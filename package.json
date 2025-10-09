@@ -1,0 +1,44 @@
+{
+  "name": "auto-messager",
+  "version": "1.0.0",
+  "description": "Automated messaging system integrating Salesforce and Glassix",
+  "type": "module",
+  "main": "dist/run.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/run.js",
+    "dev": "tsx src/run.ts",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "lint": "eslint src test --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "export:txt": "tsx export_repo_to_txt.ts",
+    "export:src": "tsx export_repo_to_txt.ts --src-only",
+    "export:all": "tsx export_repo_to_txt.ts --with-tests"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.7.7",
+    "axios-retry": "^4.5.0",
+    "bottleneck": "^2.19.5",
+    "dayjs": "^1.11.18",
+    "dotenv": "^16.4.5",
+    "jsforce": "^3.10.8",
+    "libphonenumber-js": "^1.12.23",
+    "p-map": "^7.0.3",
+    "pino": "^9.4.0",
+    "xlsx": "^0.18.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.10",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.1",
+    "pino-pretty": "^13.1.1",
+    "prettier": "^3.3.3",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.2"
+  }
+}
