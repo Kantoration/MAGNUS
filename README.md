@@ -22,23 +22,61 @@ Think of AutoMessager as a smart assistant that:
 
 **Real-world example:**
 
-Your actual Excel file (`messages_v1.xlsx`) contains message templates that get filled with customer data from Salesforce:
+Your Excel file (`messages_v1.xlsx`) contains message templates. Here's how the system matches the right message to the right customer:
 
 ```
-Salesforce Task:              Excel Template (messages_v1.xlsx):
-─────────────────────         ──────────────────────────────────
-TaskType: NEW_PHONE           שלום {{first_name}}! 
-Contact: Daniel Cohen         חברת MAGNUS מודיעה כי המכשיר
-Phone: +972501234567          {{device_model}} מוכן לאיסוף.
-Device: S24                   {{link}}
-                              
-                              ↓ SYSTEM FILLS IN THE BLANKS ↓
-                              
-Final WhatsApp Message:       שלום דניאל! חברת MAGNUS מודיעה כי
-Sent to: +972***4567          המכשיר S24 מוכן לאיסוף.
-                              (תאריך: 14/10/2025)
-                              https://magnus.co.il/devices
+STEP 1: SALESFORCE TASK
+─────────────────────────────────────────────
+Task ID: 00T1x000001
+Task_Type_Key__c: "NEW_PHONE"    ← This is the matching key!
+Ready_for_Automation__c: true
+Contact: Daniel Cohen
+  └─ FirstName: "דניאל"
+  └─ Phone: "+972501234567"
+  └─ Account.Name: "MAGNUS"
+Device_Model__c: "S24"
+
+
+STEP 2: EXCEL LOOKUP (messages_v1.xlsx)
+─────────────────────────────────────────────
+Excel Row where column "שם סוג משימה" = "NEW_PHONE":
+
+| שם סוג משימה | מלל הודעה                                          | קישור                        |
+|--------------|---------------------------------------------------|------------------------------|
+| NEW_PHONE    | שלום {{first_name}}! חברת MAGNUS מודיעה כי        | https://magnus.co.il/devices |
+|              | המכשיר {{device_model}} מוכן לאיסוף.              |                              |
+
+
+STEP 3: TEMPLATE RENDERING
+─────────────────────────────────────────────
+System replaces placeholders with actual values:
+  {{first_name}}    → "דניאל" (from Contact.FirstName)
+  {{device_model}}  → "S24" (from Task.Device_Model__c)
+  {{link}}          → https://magnus.co.il/devices (from Excel)
+  {{date}}          → "14/10/2025" (today's date, auto-injected)
+
+
+STEP 4: FINAL MESSAGE SENT
+─────────────────────────────────────────────
+To: +972***4567 (phone number masked in logs)
+
+שלום דניאל! חברת MAGNUS מודיעה כי המכשיר S24 מוכן לאיסוף.
+(תאריך: 14/10/2025)
+https://magnus.co.il/devices
 ```
+
+**How it knows which template to use:**
+
+1. System reads `Task_Type_Key__c` field from Salesforce task (e.g., "NEW_PHONE")
+2. Looks up that exact value in Excel column `שם סוג משימה` (Task Type Name)
+3. Uses the message template from `מלל הודעה` column in that row
+4. Fills in placeholders with customer data from Salesforce
+
+**This ensures:**
+- ✅ Each task type gets its own specific message
+- ✅ Customer data automatically fills in placeholders
+- ✅ Wrong template can't be sent to wrong customer
+- ✅ If template missing, task is skipped (logged for review)
 
 ### What It Does NOT Do
 
@@ -1158,11 +1196,17 @@ Here's what happens when processing one Salesforce task:
    ├─ Validate: Must be +972 (Israeli), mobile prefix (50/52/53/54/55/58)
    └─ Result: "+972501234567" (E.164 format) or NULL
               ↓
-3. DERIVE CONTEXT
-   ├─ Task Type → Template key (e.g., "NEW_PHONE")
+3. DERIVE TASK KEY & LOOKUP TEMPLATE
+   ├─ Extract: Task_Type_Key__c from Salesforce (e.g., "NEW_PHONE")
+   ├─ Normalize: Strip spaces, convert to uppercase
+   ├─ Match: Find row in Excel where "שם סוג משימה" = "NEW_PHONE"
+   └─ Result: Template with message body, link, Glassix template ID
+              ↓
+3b. BUILD CONTEXT
    ├─ Contact fields → Placeholders (first_name, account_name)
-   ├─ System → Inject date ({{date}}, {{date_he}}, {{date_iso}})
-   └─ Result: { first_name: "Daniel", date: "14/10/2025", device_model: "S24" }
+   ├─ Task custom fields → Additional data (device_model, imei)
+   ├─ System → Auto-inject date ({{date}}, {{date_he}}, {{date_iso}})
+   └─ Result: { first_name: "דניאל", date: "14/10/2025", device_model: "S24" }
               ↓
 4. RENDER MESSAGE
    ├─ Lookup template by TaskType__c
