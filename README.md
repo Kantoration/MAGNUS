@@ -22,14 +22,22 @@ Think of AutoMessager as a smart assistant that:
 
 **Real-world example:**
 
+Your actual Excel file (`messages_v1.xlsx`) contains message templates that get filled with customer data from Salesforce:
+
 ```
-Salesforce Task:          Excel Template:                      Final Message:
-─────────────────         ──────────────────────────           ─────────────────────
-Type: NEW_PHONE          "שלום {{first_name}}!                "שלום דניאל!
-Customer: Daniel Cohen    חברת MAGNUS מודיעה כי                חברת MAGNUS מודיעה כי
-Phone: +972501234567      המכשיר {{device_model}}              המכשיר S24 Galaxy
-Device: S24 Galaxy        מוכן לאיסוף."                         מוכן לאיסוף."
-                          ↓ BECOMES ↓                          (Sent to +972***4567)
+Salesforce Task:              Excel Template (messages_v1.xlsx):
+─────────────────────         ──────────────────────────────────
+TaskType: NEW_PHONE           שלום {{first_name}}! 
+Contact: Daniel Cohen         חברת MAGNUS מודיעה כי המכשיר
+Phone: +972501234567          {{device_model}} מוכן לאיסוף.
+Device: S24                   {{link}}
+                              
+                              ↓ SYSTEM FILLS IN THE BLANKS ↓
+                              
+Final WhatsApp Message:       שלום דניאל! חברת MAGNUS מודיעה כי
+Sent to: +972***4567          המכשיר S24 מוכן לאיסוף.
+                              (תאריך: 14/10/2025)
+                              https://magnus.co.il/devices
 ```
 
 ### What It Does NOT Do
@@ -51,7 +59,7 @@ Device: S24 Galaxy        מוכן לאיסוף."                         מוכ
                             ↓
 ┌─────────────────────────────────────────────────────────────┐
 │ 2. LOAD TEMPLATES                                           │
-│    • Opens your Excel file (massege_maping.xlsx)            │
+│    • Opens your Excel file (messages_v1.xlsx)               │
 │    • Reads Hebrew column headers                            │
 │    • Validates templates have required placeholders         │
 │    • Caches in memory for speed                             │
@@ -149,7 +157,7 @@ automessager support-bundle
 📁 AutoMessager/
   ├── automessager-win.exe (or automessager-mac)
   ├── .env                 ← Your config here
-  ├── massege_maping.xlsx  ← Your templates here
+  ├── messages_v1.xlsx     ← Your message templates here
   └── logs/                ← Auto-created
 ```
 
@@ -263,7 +271,7 @@ tail -50 ./logs/automessager.log
 
 **Answer:** Just edit your Excel file and save:
 
-1. Open `massege_maping.xlsx`
+1. Open `messages_v1.xlsx`
 2. Update the `מלל הודעה` column
 3. Save the file
 4. Validate: `automessager verify:mapping`
