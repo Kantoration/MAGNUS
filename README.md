@@ -108,7 +108,7 @@ https://magnus.co.il/devices
 │    For each task:                                           │
 │    a) Find the right template (matches TaskType field)      │
 │    b) Get customer phone (from Contact or Account)          │
-│    c) Validate phone is Israeli (+972) mobile number        │
+│    c) Validate phone (supports IL, US, GB, DE, FR)          │
 │    d) Render message (fill in {{first_name}}, {{date}})     │
 │    e) Send via WhatsApp                                     │
 │    f) Update Salesforce with status                         │
@@ -1193,8 +1193,9 @@ Here's what happens when processing one Salesforce task:
 2. NORMALIZE PHONE
    ├─ Extract from Contact.Phone or Account.Phone
    ├─ Clean: Remove spaces, hyphens, parentheses
-   ├─ Validate: Must be +972 (Israeli), mobile prefix (50/52/53/54/55/58)
-   └─ Result: "+972501234567" (E.164 format) or NULL
+   ├─ Validate: Check against allowed countries (default: IL, US, GB, DE, FR)
+   ├─ Format: Convert to E.164 standard (+[country][number])
+   └─ Result: "+972501234567", "+12125551234", etc. (E.164 format) or NULL
               ↓
 3. DERIVE TASK KEY & LOOKUP TEMPLATE
    ├─ Extract: Task_Type_Key__c from Salesforce (e.g., "NEW_PHONE")
