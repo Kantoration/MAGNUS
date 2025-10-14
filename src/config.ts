@@ -18,6 +18,8 @@
  * - TASKS_QUERY_LIMIT: 200
  * - LOG_LEVEL: 'info'
  * - DEFAULT_LANG: 'he'
+ * - PHONE_STRICT_VALIDATION: true (reject hidden chars/confusables)
+ * - DEFAULT_REGION: 'IL' (Israeli phone numbers)
  * - DRY_RUN: false
  * 
  * See README.md for complete configuration reference.
@@ -85,6 +87,10 @@ const configSchema = z.object({
   KEEP_READY_ON_FAIL: z.coerce.boolean().default(true),
   PERMIT_LANDLINES: z.coerce.boolean().default(false), // Allow non-mobile numbers
   PAGED: z.coerce.boolean().default(false), // Enable paging mode for large batches
+
+  // Phone Validation
+  PHONE_STRICT_VALIDATION: z.coerce.boolean().default(true), // Reject hidden chars/confusables in STRICT mode
+  DEFAULT_REGION: z.enum(['IL', 'US']).default('IL'), // Default phone region for normalization
 
   // Metrics
   METRICS_ENABLED: z.coerce.boolean().default(false), // Enable Prometheus metrics server
@@ -285,6 +291,10 @@ export function getRedactedEnvSnapshot(): Record<string, string> {
     KEEP_READY_ON_FAIL: String(config.KEEP_READY_ON_FAIL),
     PERMIT_LANDLINES: String(config.PERMIT_LANDLINES),
     PAGED: String(config.PAGED),
+
+    // Phone Validation
+    PHONE_STRICT_VALIDATION: String(config.PHONE_STRICT_VALIDATION),
+    DEFAULT_REGION: config.DEFAULT_REGION,
 
     // Retry
     RETRY_ATTEMPTS: String(config.RETRY_ATTEMPTS),

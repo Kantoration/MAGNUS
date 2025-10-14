@@ -118,19 +118,24 @@ export async function getAccessToken(): Promise<string> {
     
     return tokenData.accessToken;
   } catch (error) {
+    // If it's already a validation error, re-throw it (don't wrap)
+    if (error instanceof Error && error.name === 'GlassixValidationError') {
+      logger.error({ error: error.message }, 'Access token validation failed');
+      throw error;
+    }
+    
+    // For other errors: use hardened axios error builder
     const safeMsg = buildSafeAxiosError(error);
     
-    // Additional scrubbing for access token endpoint to prevent secret leakage
-    // This catches cases where buildSafeAxiosError might miss secrets in response bodies
-    const config = getConfig();
+    // Second pass: Paranoid scrubbing for token exchange endpoint
+    // Prevent secret leakage in response bodies or error messages
     let scrubbedMsg = safeMsg
       .replace(/"apiKey"\s*:\s*"[^"]+"/g, '"apiKey":"[REDACTED]"')
       .replace(/"secret"\s*:\s*"[^"]+"/g, '"secret":"[REDACTED]"')
-      .replace(/"api_key"\s*:\s*"[^"]+"/gi, '"api_key":"[REDACTED]"')
-      .replace(/"api_secret"\s*:\s*"[^"]+"/gi, '"api_secret":"[REDACTED]"')
-      .replace(/(?:apiKey|secret|api_key|api_secret)"\s*:\s*"[^"]+"/gi, '"[CREDENTIAL]":"[REDACTED]"');
+      .replace(/"api_key"\s*:\s*"[^"]+"/gi, '"api_key":"[REDACTED]"');
     
-    // Paranoid: Replace any occurrence of the actual API key or secret (in case it leaked through)
+    // Third pass: Replace literal credential values (in case they leaked through)
+    const config = getConfig();
     if (config.GLASSIX_API_KEY) {
       scrubbedMsg = scrubbedMsg.replace(new RegExp(config.GLASSIX_API_KEY, 'g'), '[REDACTED]');
     }
@@ -138,6 +143,7 @@ export async function getAccessToken(): Promise<string> {
       scrubbedMsg = scrubbedMsg.replace(new RegExp(config.GLASSIX_API_SECRET, 'g'), '[REDACTED]');
     }
     
+    // Log only the fully scrubbed message (never raw error)
     logger.error({ error: scrubbedMsg }, 'Failed to get access token');
     throw new Error(`Access token exchange failed: ${scrubbedMsg}`);
   }
@@ -163,12 +169,26 @@ function getBearer(): string {
 
 /**
  * Build Authorization header
+ * 
+ * SECURITY RATIONALE:
+ * - Modern flow (access token): Short-lived tokens, rotated automatically
+ *   - Reduces exposure window if token is compromised
+ *   - Supports token revocation and auditing
+ *   - Industry best practice for API security
+ * 
+ * - Legacy flow (bearer with API key): Long-lived credential in every request
+ *   - Higher risk if intercepted (no expiration)
+ *   - No rotation or revocation mechanism
+ *   - Only use when access token flow unavailable
+ *   - Requires ALLOW_LEGACY_BEARER=true in strict mode
  */
 async function authHeader(): Promise<{ Authorization: string }> {
   if (USE_ACCESS_TOKEN_FLOW) {
+    // Preferred: Modern access token flow
     const token = await getAccessToken();
     return { Authorization: `Bearer ${token}` };
   } else {
+    // Fallback: Legacy bearer mode (requires explicit opt-in in strict mode)
     return { Authorization: `Bearer ${getBearer()}` };
   }
 }
@@ -221,9 +241,8 @@ async function sendOnce(params: SendParams): Promise<SendResult> {
   }
 
   // Build headers (auth + idempotency)
-  const auth = await authHeader();
   const headers = {
-    ...auth,
+    ...(await authHeader()),
     'Content-Type': 'application/json',
     'Idempotency-Key': params.idemKey,
   };
@@ -241,9 +260,24 @@ async function sendOnce(params: SendParams): Promise<SendResult> {
     // Track latency
     endTimer();
 
-    // Track rate limit headers if present
+    // Track rate limit headers and warn if approaching limit
     if (response.headers) {
       trackRateLimit(response.headers);
+      
+      // Check rate limit remaining and warn if low
+      const remaining = response.headers['x-ratelimit-remaining'];
+      const reset = response.headers['x-ratelimit-reset'];
+      
+      if (remaining !== undefined) {
+        const remainingValue = typeof remaining === 'string' ? parseInt(remaining, 10) : remaining;
+        
+        if (!isNaN(remainingValue) && remainingValue < 10) {
+          logger.warn(
+            { remaining: remainingValue, reset },
+            'Approaching Glassix rate limit'
+          );
+        }
+      }
     }
 
     // Parse and validate response
@@ -251,7 +285,11 @@ async function sendOnce(params: SendParams): Promise<SendResult> {
   } catch (error) {
     // Track latency even on error
     endTimer();
-    throw error;
+    
+    // Use hardened error scrubbing to prevent token leakage
+    const msg = buildSafeAxiosError(error);
+    logger.warn({ to: mask(params.toE164) }, `glassix.send failed: ${msg}`);
+    throw new Error(msg);
   }
 }
 
@@ -296,12 +334,13 @@ export async function sendWhatsApp(params: SendParams): Promise<SendResult> {
       
       return result;
     } catch (e) {
+      // Always use buildSafeAxiosError to prevent token leakage
       const status = (e as AxiosError)?.response?.status;
       const msg = buildSafeAxiosError(e);
 
       logger.warn(
         { to: mask(params.toE164), attempt, status },
-        'glassix.send failed'
+        `glassix.send failed: ${msg}`
       );
 
       // Throw immediately if non-retryable or last attempt

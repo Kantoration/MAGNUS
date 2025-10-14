@@ -6,22 +6,35 @@ import type { Connection } from 'jsforce';
 import type { Config } from './config.js';
 import { getLogger } from './logger.js';
 import { mask } from './phone.js';
+import { calculateBackoff } from './http-error.js';
 import type { SendResult } from './types/glassix.js';
 
 const logger = getLogger();
 
 /**
  * Maximum length for Task Description/Audit_Trail__c field in Salesforce
+ * 
+ * Salesforce Long Text Area fields have a 32,768 character limit.
+ * We use 32,000 to leave margin for encoding overhead and safety.
  */
 const MAX_DESC = 32000;
 
 /**
  * Maximum length for Failure_Reason__c field
+ * 
+ * Text fields in Salesforce are typically 255 chars, but we use a custom
+ * Long Text Area field with 1000 char limit for better error visibility.
  */
 const MAX_FAILURE = 1000;
 
 /**
  * Maximum audit trail lines to keep (first + last N)
+ * 
+ * Smart truncation policy:
+ * - Keeps first line (creation timestamp)
+ * - Adds '...' separator
+ * - Keeps last 98 lines (100 - 2)
+ * - This preserves historical context + recent activity
  */
 const MAX_AUDIT_LINES = 100;
 
@@ -64,7 +77,33 @@ function truncate(s: string, maxLen: number): string {
 
 /**
  * Smart audit trail truncation policy
- * Keeps first line (creation timestamp) + '...' + last N lines
+ * 
+ * AUDIT POLICY:
+ * - Preserves first line (typically creation timestamp) for historical context
+ * - Inserts '...' separator to indicate truncation
+ * - Keeps last N-2 lines (most recent activity)
+ * - If total lines <= MAX_AUDIT_LINES (100), uses simple tail truncation
+ * 
+ * MAX_DESC ENFORCEMENT:
+ * - Hard limit: 32,000 characters (Salesforce Long Text Area limit)
+ * - First pass: Smart line-based truncation (first + '...' + last N)
+ * - Second pass: If still over limit, truncates from end character-wise
+ * - Ensures audit trail never exceeds Salesforce field capacity
+ * 
+ * MASKING STRATEGY:
+ * - Phone numbers are already masked by caller using mask() before audit entry
+ * - Audit format: "[timestamp] WhatsApp → +972XX***XX67 (provId=...)"
+ * - Middle digits (3rd to 2nd-to-last) are replaced with asterisks
+ * - Preserves country code and last 2 digits for debugging
+ * 
+ * @param audit - Current audit trail text
+ * @param maxLength - Maximum allowed length (default: MAX_DESC = 32000)
+ * @returns Truncated audit trail that fits within Salesforce field limits
+ * 
+ * @example
+ * // Input: Very long audit with 150 lines
+ * // Output: "[2024-01-01...] Initial\n...\n[recent entries]"
+ * truncateAuditTrail(longAudit, 32000)
  */
 function truncateAuditTrail(audit: string, maxLength: number = MAX_DESC): string {
   if (audit.length <= maxLength) {
@@ -96,7 +135,33 @@ function truncateAuditTrail(audit: string, maxLength: number = MAX_DESC): string
 
 /**
  * Salesforce Task Updater
- * Centralizes all SF update operations with retry logic and field-aware updates
+ * 
+ * Centralizes all Salesforce Task update operations with:
+ * - Retry logic using shared calculateBackoff() (exponential + jitter)
+ * - Field-aware updates (gracefully handles missing custom fields)
+ * - Non-fatal error handling (NEVER throws, logs warnings instead)
+ * - Smart audit trail management (preserves first + last N lines)
+ * - Phone number masking in all logged/stored data
+ * 
+ * KEY BEHAVIORS:
+ * 1. markCompleted(): Updates task after successful message send
+ *    - Retrieves current task to append to audit trail
+ *    - Sets Status='Completed', Delivery_Status__c='SENT', timestamps
+ *    - Retries on transient SF errors (lock rows, 5xx)
+ *    - NEVER throws (message was sent; SF update is secondary)
+ * 
+ * 2. markFailed(): Updates task after send failure
+ *    - Sets Status='Waiting on External', Failure_Reason__c
+ *    - Optionally keeps Ready_for_Automation__c for retry
+ *    - NEVER throws (ensures processing continues)
+ * 
+ * DESIGN PHILOSOPHY:
+ * - Message delivery is primary; SF updates are secondary
+ * - One task's SF issues should not block other tasks
+ * - All errors are logged with context (taskId, error, attempt)
+ * - Graceful degradation when custom fields are missing
+ * 
+ * @see buildFieldMap() for field availability detection
  */
 export class SalesforceTaskUpdater {
   constructor(
@@ -107,10 +172,27 @@ export class SalesforceTaskUpdater {
 
   /**
    * Mark task as completed with delivery details
+   * 
+   * OPERATION:
    * - Retrieves current task to get audit trail
-   * - Appends new audit entry with smart truncation
-   * - Retries on transient SF errors
-   * - Never throws (logs warnings and continues)
+   * - Appends new audit entry with smart truncation (preserves first + last N lines)
+   * - Updates Status='Completed', Delivery_Status__c='SENT', Last_Sent_At__c, etc.
+   * - Retries on transient SF errors (UNABLE_TO_LOCK_ROW, 5xx, SERVER_UNAVAILABLE)
+   * 
+   * NON-FATAL GUARANTEE:
+   * - NEVER throws exceptions (all errors are caught and logged)
+   * - Message was sent successfully; SF update failure is secondary concern
+   * - Logs warning with taskId + error message on failure, then continues
+   * - This ensures one task's SF issue doesn't block processing of other tasks
+   * 
+   * RETRY STRATEGY:
+   * - Uses shared calculateBackoff() for exponential backoff + jitter
+   * - Respects config.RETRY_ATTEMPTS (default: 3)
+   * - Base delay from config.RETRY_BASE_MS (default: 300ms)
+   * - Jitter: 0-100ms random addition to prevent thundering herd
+   * 
+   * @param taskId - Salesforce Task ID
+   * @param details - Completion details (phone, sendResult)
    */
   async markCompleted(taskId: string, details: CompletionDetails): Promise<void> {
     const now = new Date().toISOString();
@@ -189,9 +271,7 @@ export class SalesforceTaskUpdater {
           }
 
           // Retry with exponential backoff + jitter
-          const delay =
-            this.config.RETRY_BASE_MS * Math.pow(2, attempt - 1) +
-            Math.floor(Math.random() * 100);
+          const delay = calculateBackoff(attempt, this.config.RETRY_BASE_MS);
           logger.debug({ attempt, delay, taskId }, 'Retrying Task update');
           await sleep(delay);
         }
@@ -211,10 +291,30 @@ export class SalesforceTaskUpdater {
 
   /**
    * Mark task as failed with error reason
-   * - Truncates reason to MAX_FAILURE chars
-   * - Sets Failure_Reason__c if available
-   * - Optionally keeps Ready_for_Automation__c = true for retry
-   * - Never throws (logs warnings and continues)
+   * 
+   * OPERATION:
+   * - Updates Status='Waiting on External' (indicates manual intervention needed)
+   * - Sets Failure_Reason__c with truncated error message (max 1000 chars)
+   * - Optionally preserves Ready_for_Automation__c=true for retry (if KEEP_READY_ON_FAIL)
+   * 
+   * NON-FATAL GUARANTEE:
+   * - NEVER throws exceptions (all errors are caught and logged)
+   * - Logs warning with taskId + error message on failure, then continues
+   * - Special handling for INVALID_FIELD errors (logs field creation guidance)
+   * - This ensures one task's SF issue doesn't block processing of other tasks
+   * 
+   * ERROR SCRUBBING:
+   * - Reason is truncated to MAX_FAILURE (1000 chars) to prevent field overflow
+   * - No stack traces are included (clean error messages only)
+   * - Safe for logging and storage in Salesforce
+   * 
+   * FIELD AWARENESS:
+   * - Checks fieldMap before setting custom fields
+   * - Gracefully degrades if Failure_Reason__c or Ready_for_Automation__c missing
+   * - Logs helpful error if INVALID_FIELD detected (with setup instructions)
+   * 
+   * @param taskId - Salesforce Task ID
+   * @param reason - Error reason/message (will be truncated to 1000 chars)
    */
   async markFailed(taskId: string, reason: string): Promise<void> {
     // Clean error: no stack traces, truncate to MAX_FAILURE chars

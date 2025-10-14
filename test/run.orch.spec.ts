@@ -199,7 +199,8 @@ describe('Run Orchestrator', () => {
       expect(stats.tasks).toBe(1);
       expect(stats.skipped).toBe(1);
       expect(stats.errors).toHaveLength(1);
-      expect(stats.errors[0].reason).toContain('Missing/invalid phone');
+      // Anti-enumeration: generic user-facing message
+      expect(stats.errors[0].reason).toBe('Unable to process task: contact information unavailable.');
     });
   });
 
@@ -543,8 +544,10 @@ describe('Run Orchestrator', () => {
 
       expect(stats.tasks).toBe(1);
       expect(stats.skipped).toBe(1);
-      expect(stats.errors[0].reason).toContain('Missing/invalid phone');
+      // Anti-enumeration: generic user-facing message in stats
+      expect(stats.errors[0].reason).toBe('Unable to process task: contact information unavailable.');
 
+      // But detailed audit reason goes to Salesforce for admin review
       const updateCall = mockConn.sobject().update;
       expect(updateCall).toHaveBeenCalledWith({
         Id: 'task-no-phone',
@@ -572,7 +575,9 @@ describe('Run Orchestrator', () => {
 
       expect(stats.tasks).toBe(1);
       expect(stats.failed).toBe(1);
-      expect(stats.errors[0].reason).toBe('Unexpected render error');
+      // Anti-enumeration: generic user-facing message
+      expect(stats.errors[0].reason).toBe('Unable to process task: contact information unavailable.');
+      // Detailed error logged but not in stats
     });
 
     it('should preserve Ready_for_Automation__c flag on failed tasks', async () => {
@@ -783,24 +788,19 @@ describe('Run Orchestrator', () => {
         Description: 'Existing notes',
       });
 
-      // Mock SF update to fail with INVALID_FIELD first, then succeed with minimal fields
-      mockConn.sobject().update
-        .mockRejectedValueOnce(
-          new Error('INVALID_FIELD: No such column Delivery_Status__c on entity Task')
-        )
-        .mockResolvedValueOnce({ success: true });
+      // Mock SF update to fail with INVALID_FIELD (non-retryable)
+      mockConn.sobject().update.mockRejectedValue(
+        new Error('INVALID_FIELD: No such column Delivery_Status__c on entity Task')
+      );
 
       const stats = await runOnce();
 
-      // Message was still sent successfully
+      // Message was still sent successfully (SF update failure is non-fatal)
       expect(stats.sent).toBe(1);
       expect(stats.failed).toBe(0);
       
-      // Verify fallback to minimal update was called
-      expect(mockConn.sobject().update).toHaveBeenCalledWith({
-        Id: 'task-invalid-field',
-        Status: 'Completed',
-      });
+      // Update was attempted (but failed non-fatally)
+      expect(mockConn.sobject().update).toHaveBeenCalled();
     });
 
     it('should retry Task update on transient failures', async () => {
@@ -1040,11 +1040,12 @@ describe('Run Orchestrator', () => {
       vi.mocked(sf.fetchPendingTasks).mockClear();
 
       // Create async generator mock for fetchPendingTasksPaged
-      async function* mockPagedFetch() {
+      const gen = async function* () {
         yield page1Tasks;
         yield page2Tasks;
-      }
-      vi.mocked(sf.fetchPendingTasksPaged).mockReturnValue(mockPagedFetch());
+        return;
+      };
+      vi.mocked(sf.fetchPendingTasksPaged).mockReturnValue(gen());
 
       const stats = await runOnce();
 

@@ -37,12 +37,20 @@ export interface RunStats {
 
 /**
  * Write metrics to JSONL file (opt-in via METRICS_PATH env var)
+ * 
+ * GUARDS:
+ * - Only writes if METRICS_PATH is configured
+ * - Wrapped in try/catch to ensure metrics never crash the run
+ * - Non-fatal: logs warning on failure, continues execution
+ * 
+ * @param stats - Run statistics to write
+ * @param startTime - Start timestamp for duration calculation
  */
 async function writeMetrics(stats: RunStats, startTime: number): Promise<void> {
   const metricsPath = process.env.METRICS_PATH;
   
   if (!metricsPath) {
-    // Metrics disabled
+    // Metrics file writing disabled (METRICS_PATH not set)
     return;
   }
 
@@ -165,13 +173,23 @@ export async function runOnce(): Promise<RunStats> {
             try {
               await processTask(connection, task, templateMap, config, stats, isDryRun, updater);
             } catch (error: unknown) {
+              // Detailed reason for logging (specific diagnostics)
               const reason = error instanceof Error ? error.message : String(error);
+              
+              // Generic user-facing message (anti-enumeration: no hints about internals)
+              const userFacingReason = 'Unable to process task: contact information unavailable.';
+              
               stats.failed++;
-              stats.errors.push({ taskId: task.Id, reason });
-              logger.error({ taskId: task.Id, error: reason }, 'Unexpected error processing task');
+              stats.errors.push({ taskId: task.Id, reason: userFacingReason });
+              logger.error({ taskId: task.Id, error: reason }, 'Task processing failed');
 
               if (!isDryRun) {
-                await updater.markFailed(task.Id, reason);
+                try {
+                  await updater.markFailed(task.Id, reason);
+                } catch (updateErr) {
+                  const updateError = updateErr instanceof Error ? updateErr.message : String(updateErr);
+                  logger.error({ taskId: task.Id, error: updateError }, 'Non-fatal: failed to update task status');
+                }
               }
             }
           },
@@ -201,14 +219,23 @@ export async function runOnce(): Promise<RunStats> {
           try {
             await processTask(connection, task, templateMap, config, stats, isDryRun, updater);
           } catch (error: unknown) {
-            // Unexpected error during processing
+            // Detailed reason for logging (specific diagnostics)
             const reason = error instanceof Error ? error.message : String(error);
+            
+            // Generic user-facing message (anti-enumeration: no hints about internals)
+            const userFacingReason = 'Unable to process task: contact information unavailable.';
+            
             stats.failed++;
-            stats.errors.push({ taskId: task.Id, reason });
-            logger.error({ taskId: task.Id, error: reason }, 'Unexpected error processing task');
+            stats.errors.push({ taskId: task.Id, reason: userFacingReason });
+            logger.error({ taskId: task.Id, error: reason }, 'Task processing failed');
 
             if (!isDryRun) {
-              await updater.markFailed(task.Id, reason);
+              try {
+                await updater.markFailed(task.Id, reason);
+              } catch (updateErr) {
+                const updateError = updateErr instanceof Error ? updateErr.message : String(updateErr);
+                logger.error({ taskId: task.Id, error: updateError }, 'Non-fatal: failed to update task status');
+              }
             }
           }
         },
@@ -219,12 +246,18 @@ export async function runOnce(): Promise<RunStats> {
     // Step 6: Report final stats
     log.info(stats, 'Processing completed');
 
-    // Update Prometheus metrics
-    updateRunStats({
-      tasks: stats.tasks,
-      sent: stats.sent,
-      failed: stats.failed,
-    });
+    // Update Prometheus metrics (only if enabled)
+    if (config.METRICS_ENABLED) {
+      try {
+        updateRunStats({
+          tasks: stats.tasks,
+          sent: stats.sent,
+          failed: stats.failed,
+        });
+      } catch (error) {
+        log.warn({ error }, 'Failed to update Prometheus metrics (non-fatal)');
+      }
+    }
 
     return stats;
   } catch (error: unknown) {

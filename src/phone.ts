@@ -1,11 +1,83 @@
 /**
  * Phone number normalization with E.164 format and country-specific validation
+ * 
+ * VALIDATION MODES:
+ * - STRICT (default in production): Rejects inputs with hidden characters, 
+ *   format chars (ZWSP, etc.), or non-ASCII digits. Prevents confusable attacks.
+ * - LENIENT: Sanitizes hidden chars and normalizes unicode digits before parsing.
+ *   Use when integrating with systems that may include formatting chars.
+ * 
+ * Configure via PHONE_STRICT_VALIDATION env var (default: true)
+ * 
  * Uses country map abstraction for market expansion
  */
 import { parsePhoneNumber, CountryCode } from 'libphonenumber-js/max';
 import { getLogger } from './logger.js';
+import { getConfig } from './config.js';
 import type { Logger } from 'pino';
 import { applyCountryHeuristics, isMobileNumber as checkMobileNumber } from './phone-countries.js';
+
+/**
+ * Check if string contains suspicious characters in STRICT mode
+ * Rejects:
+ * - Format characters (\p{Cf}): ZWSP, ZWNJ, ZWJ, WORD JOINER, BOM, etc.
+ * - Control characters (\p{Cc}): NULL, BACKSPACE, newlines, tabs, etc.
+ * - Non-standard whitespace: non-breaking space, em space, thin space, etc.
+ * - Multiple consecutive plus signs or plus in middle of number
+ * - SQL injection patterns, script tags
+ */
+function containsSuspiciousChars(str: string): boolean {
+  // Format characters (invisible)
+  if (/\p{Cf}/u.test(str)) return true;
+  
+  // Control characters (C0 and C1 ranges: NULL, BACKSPACE, tabs, newlines, etc.)
+  // Except regular space (U+0020)
+  if (/[\x00-\x1F\x7F-\x9F]/u.test(str)) return true;
+  
+  // Non-standard whitespace (non-breaking space, em/en spaces, thin/hair spaces, etc.)
+  // U+00A0 (nbsp), U+2000-U+200A (various spaces), U+202F (narrow nbsp), U+205F (medium math space), U+3000 (ideographic space)
+  if (/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/u.test(str)) return true;
+  
+  // Multiple plus signs or plus in wrong position (not at start)
+  if (/\+.*\+/.test(str)) return true; // Multiple plus signs
+  if (/^\+?[^+]*\+/.test(str)) return true; // Plus not at start (after allowing optional leading +)
+  
+  // SQL injection patterns
+  if (/['";]|--|\/\*|\*\/|DROP|SELECT|INSERT|UPDATE|DELETE|UNION/i.test(str)) return true;
+  
+  // Script tags
+  if (/<script|<\/script/i.test(str)) return true;
+  
+  return false;
+}
+
+/**
+ * Check if string contains non-ASCII digits or mixed scripts
+ * Rejects confusable attacks like using Arabic-Indic digits
+ */
+function containsNonASCIIDigits(str: string): boolean {
+  // Match any Unicode digit that's not ASCII 0-9
+  // \p{Nd} = all Unicode decimal digits, [0-9] = ASCII digits
+  return /\p{Nd}/u.test(str) && /[^\x00-\x7F0-9+\s()-]/u.test(str);
+}
+
+/**
+ * Sanitize phone input in LENIENT mode
+ * - Strips format characters (ZWSP, ZWNJ, ZWJ, etc.)
+ * - Normalizes unicode digits to ASCII
+ * - Preserves ASCII digits, +, spaces, hyphens, parentheses
+ */
+function sanitizePhoneInput(str: string): string {
+  // Remove all format characters (\p{Cf})
+  let sanitized = str.replace(/\p{Cf}/gu, '');
+  
+  // Normalize unicode digits to ASCII (if present)
+  // This handles Arabic-Indic, Devanagari, etc.
+  sanitized = sanitized.replace(/[\u0660-\u0669]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x0660 + 0x30)); // Arabic-Indic
+  sanitized = sanitized.replace(/[\u06F0-\u06F9]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x06F0 + 0x30)); // Extended Arabic-Indic
+  
+  return sanitized;
+}
 
 export class PhoneNormalizer {
   private defaultCountry: CountryCode;
@@ -30,7 +102,17 @@ export class PhoneNormalizer {
   }
 
   /**
-   * Normalize a phone number to E.164 format with strict IL heuristics
+   * Normalize a phone number to E.164 format
+   * 
+   * STRICT MODE (default):
+   * - Rejects inputs with format characters (\p{Cf}: ZWSP, ZWNJ, etc.)
+   * - Rejects inputs with non-ASCII digits (confusables)
+   * - Returns null if validation fails
+   * 
+   * LENIENT MODE:
+   * - Strips format characters before parsing
+   * - Normalizes unicode digits to ASCII
+   * - More permissive for legacy systems
    */
   normalize(phoneNumber: string | undefined | null): string | null {
     if (!phoneNumber) {
@@ -38,8 +120,35 @@ export class PhoneNormalizer {
     }
 
     try {
+      const config = getConfig();
+      let input = phoneNumber.trim();
+
+      // STRICT validation: reject hidden chars, confusables, and injection attempts
+      if (config.PHONE_STRICT_VALIDATION) {
+        if (containsSuspiciousChars(input)) {
+          this.log(
+            'warn',
+            { phoneNumber: mask(phoneNumber) },
+            'STRICT mode: Rejected phone with suspicious characters (hidden/control/injection)'
+          );
+          return null;
+        }
+
+        if (containsNonASCIIDigits(input)) {
+          this.log(
+            'warn',
+            { phoneNumber: mask(phoneNumber) },
+            'STRICT mode: Rejected phone with non-ASCII digits or mixed scripts'
+          );
+          return null;
+        }
+      } else {
+        // LENIENT mode: sanitize input
+        input = sanitizePhoneInput(input);
+      }
+
       // Clean the input - keep only digits and leading '+'
-      let cleaned = phoneNumber.trim();
+      let cleaned = input;
 
       // Strip all non-digits except leading '+'
       const hasPlus = cleaned.startsWith('+');
@@ -73,14 +182,14 @@ export class PhoneNormalizer {
         return null;
       }
 
-      this.log('debug', { original: phoneNumber, normalized: e164 }, 'Normalized phone number');
+      this.log('debug', { original: mask(phoneNumber), normalized: e164 }, 'Normalized phone number');
 
       return e164;
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.log(
         'warn',
-        { phoneNumber, error: errorMessage },
+        { phoneNumber: mask(phoneNumber), error: errorMessage },
         'Error normalizing phone number'
       );
       return null;

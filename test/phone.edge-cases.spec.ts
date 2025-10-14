@@ -3,8 +3,15 @@
  * Tests for anti-enumeration, unicode confusables, and hidden characters
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { normalizeE164, isAllowedE164, mask } from '../src/phone.js';
+
+// Set STRICT validation mode and IL-only restriction for all tests
+beforeAll(() => {
+  process.env.PHONE_STRICT_VALIDATION = 'true';
+  process.env.DEFAULT_REGION = 'IL';
+  process.env.ALLOWED_COUNTRIES = 'IL'; // Restrict to Israeli numbers only
+});
 
 describe('Phone Normalization - Anti-Enumeration', () => {
   describe('Non-Israeli Numbers (Country Restrictions)', () => {

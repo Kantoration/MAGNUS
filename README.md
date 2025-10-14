@@ -178,6 +178,23 @@ automessager support-bundle
 
 ---
 
+## 🚀 Quick Reference - CLI Commands
+
+| Command | Purpose | Example |
+|---------|---------|---------|
+| `automessager init` | Interactive setup wizard - creates/updates .env file | First-time setup |
+| `automessager verify` | Test all connections (Salesforce, Glassix, Excel, phone validation) | Pre-deployment check |
+| `automessager dry-run` | Preview messages without sending (validates entire workflow) | Test before going live |
+| `automessager run` | Execute normally - send messages to customers | Daily production run |
+| `automessager doctor` | Deep diagnostics with prescriptive troubleshooting | When things aren't working |
+| `automessager support-bundle` | Create redacted diagnostic ZIP (safe to share, no secrets) | Share with support team |
+| `automessager verify:mapping` | Validate Excel templates only | Excel file troubleshooting |
+| `automessager version` | Show version, Node.js, and platform info | Check installation |
+
+**💡 Tip:** All commands support `--help` flag for detailed options.
+
+---
+
 ## ❓ FAQ (Frequently Asked Questions)
 
 ### Where do I put the `.env` and Excel files?
@@ -425,6 +442,19 @@ AutoMessager reloads templates when the file timestamp changes.
 ## 🚀 Quickstart (Source Install - For Developers)
 
 This section is for developers installing and running AutoMessager from source.
+
+### Quick Reference
+
+| Command | Purpose |
+|---------|---------|
+| `automessager init` | Interactive setup wizard |
+| `automessager verify` | Test all connections |
+| `automessager dry-run` | Preview without sending |
+| `automessager run` | Execute normally |
+| `automessager doctor` | Deep diagnostics |
+| `automessager support-bundle` | Create redacted support ZIP |
+| `automessager verify:mapping` | Validate Excel templates |
+| `automessager version` | Show version info |
 
 ### Prerequisites
 

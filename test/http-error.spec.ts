@@ -39,23 +39,40 @@ describe('HTTP Error Utilities', () => {
       axios.isAxiosError = originalIsAxiosError;
     });
 
-    it('should redact authorization headers', () => {
-      const mockError = {
-        isAxiosError: true,
-        response: {
-          status: 401,
-          statusText: 'Unauthorized',
-          data: 'authorization: "Bearer secret123"',
-        },
-      } as AxiosError;
+    it('should redact authorization headers - various formats', () => {
+      const testCases = [
+        // Case 1: Standard format with double quotes
+        { data: 'authorization: "Bearer secret123"', secret: 'secret123' },
+        // Case 2: With optional quote in key (JSON-like)
+        { data: '"authorization": "abc123xyz"', secret: 'abc123xyz' },
+        // Case 3: Single quotes
+        { data: "authorization: 'token456'", secret: 'token456' },
+        // Case 4: Mixed case (should be case-insensitive)
+        { data: 'Authorization: "SECRET789"', secret: 'SECRET789' },
+        // Case 5: Authorization header with Bearer prefix
+        { data: 'Authorization: Bearer mysecrettoken', secret: 'mysecrettoken' },
+        // Case 6: No quotes
+        { data: 'authorization:"key123"', secret: 'key123' },
+      ];
 
       const originalIsAxiosError = axios.isAxiosError;
       axios.isAxiosError = (payload: any): payload is AxiosError => payload?.isAxiosError === true;
 
-      const result = buildSafeAxiosError(mockError);
-      
-      expect(result).not.toContain('secret123');
-      expect(result).toContain('[REDACTED]');
+      testCases.forEach(({ data, secret }, index) => {
+        const mockError = {
+          isAxiosError: true,
+          response: {
+            status: 401,
+            statusText: 'Unauthorized',
+            data,
+          },
+        } as AxiosError;
+
+        const result = buildSafeAxiosError(mockError);
+        
+        expect(result, `Test case ${index + 1} should not contain secret`).not.toContain(secret);
+        expect(result, `Test case ${index + 1} should contain [REDACTED]`).toContain('[REDACTED]');
+      });
 
       axios.isAxiosError = originalIsAxiosError;
     });
@@ -78,6 +95,45 @@ describe('HTTP Error Utilities', () => {
       
       expect(result).not.toContain('abc123xyz456');
       expect(result).toContain('Bearer [REDACTED]');
+
+      axios.isAxiosError = originalIsAxiosError;
+    });
+
+    it('should redact API keys and secrets - various formats', () => {
+      const testCases = [
+        // JSON format with quotes
+        { data: '{"apiKey": "secret123"}', secret: 'secret123' },
+        { data: '{"api_key": "key456"}', secret: 'key456' },
+        { data: '{"apiSecret": "mysecret"}', secret: 'mysecret' },
+        { data: '{"api_secret": "topsecret"}', secret: 'topsecret' },
+        // Without quotes around key
+        { data: 'apiKey: "value789"', secret: 'value789' },
+        { data: 'api_key: "abc123"', secret: 'abc123' },
+        // Case variations
+        { data: '{"API_KEY": "CAPSKEY"}', secret: 'CAPSKEY' },
+        { data: 'API_SECRET="secret"', secret: 'secret' },
+        // Query string format
+        { data: 'error?api_key=qwerty123&other=param', secret: 'qwerty123' },
+      ];
+
+      const originalIsAxiosError = axios.isAxiosError;
+      axios.isAxiosError = (payload: any): payload is AxiosError => payload?.isAxiosError === true;
+
+      testCases.forEach(({ data, secret }, index) => {
+        const mockError = {
+          isAxiosError: true,
+          response: {
+            status: 401,
+            statusText: 'Unauthorized',
+            data,
+          },
+        } as AxiosError;
+
+        const result = buildSafeAxiosError(mockError);
+        
+        expect(result, `Test case ${index + 1} should not contain secret: ${secret}`).not.toContain(secret);
+        expect(result, `Test case ${index + 1} should contain [REDACTED]`).toContain('[REDACTED]');
+      });
 
       axios.isAxiosError = originalIsAxiosError;
     });
@@ -146,24 +202,37 @@ describe('HTTP Error Utilities', () => {
       expect(backoff3).toBeLessThan(1300);
     });
 
-    it('should add jitter between 0-100ms', () => {
+    it('should add jitter in range [0, 100] ms', () => {
       const baseMs = 300;
       const results: number[] = [];
+      const jitters: number[] = [];
       
-      // Generate 10 backoff values
-      for (let i = 0; i < 10; i++) {
-        results.push(calculateBackoff(1, baseMs));
+      // Generate 20 backoff values to ensure good coverage
+      for (let i = 0; i < 20; i++) {
+        const result = calculateBackoff(1, baseMs);
+        results.push(result);
+        
+        // Extract jitter: result = base * 2^(attempt-1) + jitter
+        // For attempt=1: result = 300 + jitter
+        const jitter = result - 300;
+        jitters.push(jitter);
       }
       
-      // All should be in range [300, 400)
-      results.forEach((result) => {
-        expect(result).toBeGreaterThanOrEqual(300);
-        expect(result).toBeLessThan(400);
+      // All results should be in range [baseMs, baseMs + 100)
+      results.forEach((result, index) => {
+        expect(result, `Result ${index + 1} should be >= ${baseMs}`).toBeGreaterThanOrEqual(baseMs);
+        expect(result, `Result ${index + 1} should be < ${baseMs + 100}`).toBeLessThan(baseMs + 100);
+      });
+      
+      // All jitters should be in range [0, 100)
+      jitters.forEach((jitter, index) => {
+        expect(jitter, `Jitter ${index + 1} should be >= 0`).toBeGreaterThanOrEqual(0);
+        expect(jitter, `Jitter ${index + 1} should be < 100`).toBeLessThan(100);
       });
       
       // Should have variance (not all the same)
       const unique = new Set(results);
-      expect(unique.size).toBeGreaterThan(1);
+      expect(unique.size, 'Should have multiple unique backoff values').toBeGreaterThan(1);
     });
   });
 });

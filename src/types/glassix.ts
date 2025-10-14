@@ -18,20 +18,24 @@ export type AccessTokenResponse = z.infer<typeof AccessTokenResponseSchema>;
 /**
  * Send Response Schema
  * Returned from POST /api/messages or /v1/protocols/send
- * Supports multiple response formats (lenient parsing)
+ * 
+ * STRICT VALIDATION:
+ * - conversationUrl MUST be valid URL if present (rejects invalid URLs)
+ * - providerId MUST be non-empty string if present
+ * - Supports multiple response formats for API flexibility
  */
 export const SendResponseSchema = z.object({
-  // Provider ID (various field names)
-  id: z.string().optional(),
-  messageId: z.string().optional(),
-  providerId: z.string().optional(),
-  sid: z.string().optional(),
+  // Provider ID (various field names) - must be non-empty if present
+  id: z.string().min(1).optional(),
+  messageId: z.string().min(1).optional(),
+  providerId: z.string().min(1).optional(),
+  sid: z.string().min(1).optional(),
   
-  // Conversation URL (various field names)
+  // Conversation URL (various field names) - must be valid URL if present
   conversationUrl: z.string().url().optional(),
   conversation_link: z.string().url().optional(),
   conversation: z.object({
-    id: z.string().optional(),
+    id: z.string().min(1).optional(),
     url: z.string().url().optional(),
   }).optional(),
   

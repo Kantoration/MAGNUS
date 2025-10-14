@@ -378,6 +378,14 @@ RETRY_BASE_MS=300
 # ========================================
 LOG_LEVEL=info
 # Options: trace, debug, info, warn, error, fatal
+
+# ========================================
+# Metrics (Optional - for Prometheus monitoring)
+# ========================================
+METRICS_ENABLED=false
+# Set to true to expose Prometheus metrics on /metrics endpoint
+METRICS_PORT=9090
+# Port for Prometheus metrics server (default: 9090)
 ```
 
 ### Important Variables
@@ -390,6 +398,8 @@ LOG_LEVEL=info
 | `GLASSIX_TIMEOUT_MS` | ❌ | `15000` | Request timeout in milliseconds |
 | `XSLX_MAPPING_PATH` | ✅ | `./massege_maping.xlsx` | Path to Excel mapping file |
 | `LOG_LEVEL` | ❌ | `info` | Logging verbosity |
+| `METRICS_ENABLED` | ❌ | `false` | Enable Prometheus metrics endpoint |
+| `METRICS_PORT` | ❌ | `9090` | Port for Prometheus metrics server |
 
 ### Deprecated Variables
 
