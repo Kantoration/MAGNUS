@@ -23,6 +23,7 @@ import Bottleneck from 'bottleneck';
 import { getConfig, USE_ACCESS_TOKEN_FLOW } from './config.js';
 import { getLogger } from './logger.js';
 import { mask, isAllowedE164 } from './phone.js';
+import { getSupportedCountries } from './phone-countries.js';
 import { buildSafeAxiosError, isRetryableStatus, calculateBackoff } from './http-error.js';
 import { glassixSendLatency, trackRateLimit, recordSendResult } from './metrics.js';
 import {
@@ -264,7 +265,8 @@ async function sendOnce(params: SendParams): Promise<SendResult> {
 export async function sendWhatsApp(params: SendParams): Promise<SendResult> {
   // Validate phone number using centralized country logic
   if (!isAllowedE164(params.toE164)) {
-    throw new Error(`Invalid phone number format: ${mask(params.toE164)}. Only Israeli (+972) numbers are supported.`);
+    const supportedCountries = getSupportedCountries().join(', ');
+    throw new Error(`Invalid phone number format: ${mask(params.toE164)}. Supported countries: ${supportedCountries}`);
   }
 
   // DRY_RUN mode

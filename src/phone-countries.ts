@@ -98,11 +98,66 @@ const usRule: CountryRule = {
 };
 
 /**
+ * UK (United Kingdom) validation rules
+ */
+const ukRule: CountryRule = {
+  code: 'GB',
+  name: 'United Kingdom',
+  e164Pattern: /^\+44\d{10}$/,
+  mobileCheck: undefined, // UK mobile starts with 7, but we'll accept all for now
+  heuristics: (cleaned: string): string => {
+    // Format: 07XXX XXXXXX (11 digits) → +447XXXXXXXXX
+    if (!cleaned.startsWith('+') && cleaned.startsWith('0') && cleaned.length === 11) {
+      return '+44' + cleaned.substring(1);
+    }
+    return cleaned;
+  },
+};
+
+/**
+ * Germany validation rules
+ */
+const deRule: CountryRule = {
+  code: 'DE',
+  name: 'Germany',
+  e164Pattern: /^\+49\d{10,11}$/,
+  mobileCheck: undefined,
+  heuristics: (cleaned: string): string => {
+    // Format: 0XXX XXXXXXX → +49XXXXXXXXXX
+    if (!cleaned.startsWith('+') && cleaned.startsWith('0')) {
+      return '+49' + cleaned.substring(1);
+    }
+    return cleaned;
+  },
+};
+
+/**
+ * France validation rules
+ */
+const frRule: CountryRule = {
+  code: 'FR',
+  name: 'France',
+  e164Pattern: /^\+33\d{9}$/,
+  mobileCheck: undefined,
+  heuristics: (cleaned: string): string => {
+    // Format: 0X XX XX XX XX → +33XXXXXXXXX
+    if (!cleaned.startsWith('+') && cleaned.startsWith('0') && cleaned.length === 10) {
+      return '+33' + cleaned.substring(1);
+    }
+    return cleaned;
+  },
+};
+
+/**
  * Country rules registry
+ * Add more countries as needed for market expansion
  */
 const COUNTRY_RULES = new Map<CountryCode, CountryRule>([
   ['IL', israelRule],
-  ['US', usRule], // Placeholder for future expansion
+  ['US', usRule],
+  ['GB', ukRule],
+  ['DE', deRule],
+  ['FR', frRule],
 ]);
 
 /**
@@ -130,12 +185,45 @@ export function isCountrySupported(country: CountryCode): boolean {
 
 /**
  * Get active countries from configuration
- * Returns array of enabled countries (currently only IL)
+ * Returns array of enabled countries
+ * 
+ * Reads from ALLOWED_COUNTRIES env var (comma-separated country codes)
+ * Default: All registered countries (IL, US, GB, DE, FR)
+ * 
+ * Examples:
+ *   ALLOWED_COUNTRIES=IL          (Israel only)
+ *   ALLOWED_COUNTRIES=IL,US       (Israel + US)
+ *   ALLOWED_COUNTRIES=*           (All supported countries)
+ *   (not set)                     (All supported countries)
  */
 export function getActiveCountries(): CountryCode[] {
-  // For now, only Israel is active
-  // Future: Read from ALLOWED_COUNTRIES env var
-  return ['IL'];
+  const allowedCountriesEnv = process.env.ALLOWED_COUNTRIES?.trim();
+  
+  // If explicitly set to *, or not set at all, allow all registered countries
+  if (!allowedCountriesEnv || allowedCountriesEnv === '*') {
+    return Array.from(COUNTRY_RULES.keys());
+  }
+  
+  // Parse comma-separated list
+  const requestedCountries = allowedCountriesEnv
+    .split(',')
+    .map(c => c.trim().toUpperCase())
+    .filter(c => c.length > 0);
+  
+  // Filter to only registered countries
+  const validCountries: CountryCode[] = [];
+  for (const code of requestedCountries) {
+    if (COUNTRY_RULES.has(code as CountryCode)) {
+      validCountries.push(code as CountryCode);
+    }
+  }
+  
+  // If no valid countries found, default to all (safety fallback)
+  if (validCountries.length === 0) {
+    return Array.from(COUNTRY_RULES.keys());
+  }
+  
+  return validCountries;
 }
 
 /**
