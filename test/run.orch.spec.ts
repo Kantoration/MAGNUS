@@ -40,13 +40,38 @@ describe('Run Orchestrator', () => {
       query: vi.fn().mockResolvedValue({ 
         records: [{ Id: 'task-id', Description: '' }] 
       }),
+      describeSObject: vi.fn().mockResolvedValue({
+        fields: [
+          { name: 'Id' },
+          { name: 'Status' },
+          { name: 'Description' },
+          { name: 'Delivery_Status__c' },
+          { name: 'Last_Sent_At__c' },
+          { name: 'Glassix_Conversation_URL__c' },
+          { name: 'Failure_Reason__c' },
+          { name: 'Ready_for_Automation__c' },
+        ],
+      }),
       sobject: vi.fn().mockReturnValue({
         update: vi.fn().mockResolvedValue({ success: true }),
+        retrieve: vi.fn().mockResolvedValue({ Id: 'task-id', Description: '' }),
       }),
     };
 
     // Mock SF module
     vi.mocked(sf.login).mockResolvedValue(mockConn as Connection);
+    vi.mocked(sf.describeTaskFields).mockResolvedValue(
+      new Set([
+        'Id',
+        'Status',
+        'Description',
+        'Delivery_Status__c',
+        'Last_Sent_At__c',
+        'Glassix_Conversation_URL__c',
+        'Failure_Reason__c',
+        'Ready_for_Automation__c',
+      ])
+    );
     vi.mocked(sf.fetchPendingTasks).mockResolvedValue([]);
     vi.mocked(sf.deriveTaskKey).mockReturnValue('TEST_KEY');
     vi.mocked(sf.getContext).mockReturnValue({});
@@ -113,7 +138,7 @@ describe('Run Orchestrator', () => {
       const stats = await runOnce();
 
       // Verify stats
-      expect(stats.total).toBe(2);
+      expect(stats.tasks).toBe(2);
       expect(stats.sent).toBe(0); // DRY_RUN doesn't send
       expect(stats.previewed).toBe(2); // DRY_RUN previews
       expect(stats.failed).toBe(0);
@@ -171,7 +196,7 @@ describe('Run Orchestrator', () => {
 
       const stats = await runOnce();
 
-      expect(stats.total).toBe(1);
+      expect(stats.tasks).toBe(1);
       expect(stats.skipped).toBe(1);
       expect(stats.errors).toHaveLength(1);
       expect(stats.errors[0].reason).toContain('Missing/invalid phone');
@@ -198,7 +223,7 @@ describe('Run Orchestrator', () => {
       const stats = await runOnce();
 
       // Verify stats
-      expect(stats.total).toBe(1);
+      expect(stats.tasks).toBe(1);
       expect(stats.sent).toBe(1);
       expect(stats.previewed).toBe(0);
       expect(stats.failed).toBe(0);
@@ -306,20 +331,16 @@ describe('Run Orchestrator', () => {
         providerId: 'msg-123',
       });
 
-      // Mock the query call to return the existing description
-      mockConn.query = vi.fn().mockResolvedValue({
-        records: [{
-          Id: 'task-preserve-desc',
-          Description: existingDescription,
-        }],
+      // Mock the retrieve call to return the existing description
+      mockConn.sobject().retrieve = vi.fn().mockResolvedValue({
+        Id: 'task-preserve-desc',
+        Description: existingDescription,
       });
 
       await runOnce();
 
-      // Verify query was called with correct SOQL
-      expect(mockConn.query).toHaveBeenCalledWith(
-        expect.stringContaining("SELECT Description FROM Task WHERE Id='task-preserve-desc'")
-      );
+      // Verify retrieve was called instead of query
+      expect(mockConn.sobject().retrieve).toHaveBeenCalledWith('task-preserve-desc');
 
       const updateCall = mockConn.sobject().update;
       expect(updateCall).toHaveBeenCalled();
@@ -353,12 +374,10 @@ describe('Run Orchestrator', () => {
         providerId: 'msg-123',
       });
 
-      // Mock the query call to return the long description
-      mockConn.query = vi.fn().mockResolvedValue({
-        records: [{
-          Id: 'task-long-desc',
-          Description: longDescription,
-        }],
+      // Mock the retrieve call to return the long description
+      mockConn.sobject().retrieve = vi.fn().mockResolvedValue({
+        Id: 'task-long-desc',
+        Description: longDescription,
       });
 
       await runOnce();
@@ -390,11 +409,9 @@ describe('Run Orchestrator', () => {
       });
 
       // Mock huge existing description
-      mockConn.query = vi.fn().mockResolvedValue({
-        records: [{
-          Id: 'task-huge-desc',
-          Description: hugeDescription,
-        }],
+      mockConn.sobject().retrieve = vi.fn().mockResolvedValue({
+        Id: 'task-huge-desc',
+        Description: hugeDescription,
       });
 
       await runOnce();
@@ -436,7 +453,7 @@ describe('Run Orchestrator', () => {
       const stats = await runOnce();
 
       // Verify stats
-      expect(stats.total).toBe(1);
+      expect(stats.tasks).toBe(1);
       expect(stats.sent).toBe(0);
       expect(stats.failed).toBe(1);
       expect(stats.errors).toHaveLength(1);
@@ -490,7 +507,7 @@ describe('Run Orchestrator', () => {
 
       const stats = await runOnce();
 
-      expect(stats.total).toBe(1);
+      expect(stats.tasks).toBe(1);
       expect(stats.skipped).toBe(1);
       expect(stats.errors[0].reason).toBe('Template not found: UNKNOWN_KEY');
 
@@ -524,7 +541,7 @@ describe('Run Orchestrator', () => {
 
       const stats = await runOnce();
 
-      expect(stats.total).toBe(1);
+      expect(stats.tasks).toBe(1);
       expect(stats.skipped).toBe(1);
       expect(stats.errors[0].reason).toContain('Missing/invalid phone');
 
@@ -553,7 +570,7 @@ describe('Run Orchestrator', () => {
 
       const stats = await runOnce();
 
-      expect(stats.total).toBe(1);
+      expect(stats.tasks).toBe(1);
       expect(stats.failed).toBe(1);
       expect(stats.errors[0].reason).toBe('Unexpected render error');
     });
@@ -673,7 +690,7 @@ describe('Run Orchestrator', () => {
 
       const stats = await runOnce();
 
-      expect(stats.total).toBe(0);
+      expect(stats.tasks).toBe(0);
       expect(stats.sent).toBe(0);
       expect(stats.previewed).toBe(0);
       expect(stats.failed).toBe(0);
@@ -719,7 +736,7 @@ describe('Run Orchestrator', () => {
 
       const stats = await runOnce();
 
-      expect(stats.total).toBe(3);
+      expect(stats.tasks).toBe(3);
       expect(stats.sent).toBe(2);
       expect(stats.failed).toBe(1);
       expect(glassix.sendWhatsApp).toHaveBeenCalledTimes(3);
@@ -760,10 +777,18 @@ describe('Run Orchestrator', () => {
 
       vi.mocked(sf.fetchPendingTasks).mockResolvedValue(mockTasks);
 
-      // Mock SF update to fail with INVALID_FIELD
-      mockConn.sobject().update.mockRejectedValue(
-        new Error('INVALID_FIELD: No such column Delivery_Status__c on entity Task')
-      );
+      // Mock retrieve to return task
+      mockConn.sobject().retrieve = vi.fn().mockResolvedValue({
+        Id: 'task-invalid-field',
+        Description: 'Existing notes',
+      });
+
+      // Mock SF update to fail with INVALID_FIELD first, then succeed with minimal fields
+      mockConn.sobject().update
+        .mockRejectedValueOnce(
+          new Error('INVALID_FIELD: No such column Delivery_Status__c on entity Task')
+        )
+        .mockResolvedValueOnce({ success: true });
 
       const stats = await runOnce();
 
@@ -771,7 +796,77 @@ describe('Run Orchestrator', () => {
       expect(stats.sent).toBe(1);
       expect(stats.failed).toBe(0);
       
-      // The error should be logged (verified by not throwing)
+      // Verify fallback to minimal update was called
+      expect(mockConn.sobject().update).toHaveBeenCalledWith({
+        Id: 'task-invalid-field',
+        Status: 'Completed',
+      });
+    });
+
+    it('should retry Task update on transient failures', async () => {
+      const mockTasks: sf.STask[] = [
+        {
+          Id: 'task-retry-update',
+          Subject: 'Test',
+          Status: 'Not Started',
+        },
+      ];
+
+      vi.mocked(sf.fetchPendingTasks).mockResolvedValue(mockTasks);
+
+      mockConn.sobject().retrieve = vi.fn().mockResolvedValue({
+        Id: 'task-retry-update',
+        Description: '',
+      });
+
+      // Fail first two attempts, succeed on third
+      mockConn.sobject().update
+        .mockRejectedValueOnce(new Error('UNABLE_TO_LOCK_ROW'))
+        .mockRejectedValueOnce(new Error('UNABLE_TO_LOCK_ROW'))
+        .mockResolvedValueOnce({ success: true });
+
+      const stats = await runOnce();
+
+      expect(stats.sent).toBe(1);
+      // Verify 3 update attempts were made
+      expect(mockConn.sobject().update).toHaveBeenCalledTimes(3);
+    });
+
+    it('should skip missing fields when updating Task', async () => {
+      const mockTasks: sf.STask[] = [
+        {
+          Id: 'task-missing-fields',
+          Subject: 'Test',
+          Status: 'Not Started',
+        },
+      ];
+
+      vi.mocked(sf.fetchPendingTasks).mockResolvedValue(mockTasks);
+
+      // Mock describeTaskFields to return minimal field set (missing custom fields)
+      vi.mocked(sf.describeTaskFields).mockResolvedValue(
+        new Set(['Id', 'Status', 'Description']) // Only standard fields
+      );
+
+      mockConn.sobject().retrieve = vi.fn().mockResolvedValue({
+        Id: 'task-missing-fields',
+        Description: '',
+      });
+
+      const stats = await runOnce();
+
+      expect(stats.sent).toBe(1);
+
+      // Verify update only includes available fields
+      const updateCall = mockConn.sobject().update;
+      const updatePayload = updateCall.mock.calls[0][0];
+      
+      expect(updatePayload.Status).toBe('Completed');
+      expect(updatePayload.Description).toBeDefined();
+      // Custom fields should NOT be included
+      expect(updatePayload).not.toHaveProperty('Delivery_Status__c');
+      expect(updatePayload).not.toHaveProperty('Last_Sent_At__c');
+      expect(updatePayload).not.toHaveProperty('Glassix_Conversation_URL__c');
     });
 
     it('should log helpful message when INVALID_FIELD error occurs on failure', async () => {
@@ -873,14 +968,15 @@ describe('Run Orchestrator', () => {
         providerId: 'msg-e2e-456',
       });
 
-      mockConn.query = vi.fn().mockResolvedValue({
-        records: [{ Id: 'task-e2e-123', Description: 'Original notes' }],
+      mockConn.sobject().retrieve = vi.fn().mockResolvedValue({
+        Id: 'task-e2e-123',
+        Description: 'Original notes',
       });
 
       const stats = await runOnce();
 
       // Verify stats
-      expect(stats.total).toBe(1);
+      expect(stats.tasks).toBe(1);
       expect(stats.sent).toBe(1);
       expect(stats.previewed).toBe(0);
       expect(stats.failed).toBe(0);
@@ -909,10 +1005,57 @@ describe('Run Orchestrator', () => {
         })
       );
 
-      // Verify query was called to fetch existing description
-      expect(mockConn.query).toHaveBeenCalledWith(
-        expect.stringContaining("SELECT Description FROM Task WHERE Id='task-e2e-123'")
-      );
+      // Verify retrieve was called to fetch existing description
+      expect(mockConn.sobject().retrieve).toHaveBeenCalledWith('task-e2e-123');
+    });
+
+    it('should process multiple pages in PAGED mode', async () => {
+      process.env.PAGED = '1';
+
+      // Create mock tasks across 2 pages
+      const page1Tasks: sf.STask[] = [
+        { Id: 'page1-task1', Subject: 'Test 1', Status: 'Not Started' },
+        { Id: 'page1-task2', Subject: 'Test 2', Status: 'Not Started' },
+      ];
+
+      const page2Tasks: sf.STask[] = [
+        { Id: 'page2-task1', Subject: 'Test 3', Status: 'Not Started' },
+      ];
+
+      // Mock query to return first page, then queryMore for second
+      mockConn.query = vi.fn().mockResolvedValue({
+        records: page1Tasks,
+        done: false,
+        nextRecordsUrl: '/query/next',
+        totalSize: 3,
+      });
+
+      mockConn.queryMore = vi.fn().mockResolvedValue({
+        records: page2Tasks,
+        done: true,
+        totalSize: 3,
+      });
+
+      // Override fetchPendingTasks mock to not be called
+      vi.mocked(sf.fetchPendingTasks).mockClear();
+
+      // Create async generator mock for fetchPendingTasksPaged
+      async function* mockPagedFetch() {
+        yield page1Tasks;
+        yield page2Tasks;
+      }
+      vi.mocked(sf.fetchPendingTasksPaged).mockReturnValue(mockPagedFetch());
+
+      const stats = await runOnce();
+
+      // Verify all tasks were processed
+      expect(stats.tasks).toBe(3);
+      expect(stats.sent).toBe(3);
+      expect(stats.failed).toBe(0);
+
+      // Verify paged fetch was used instead of single fetch
+      expect(sf.fetchPendingTasksPaged).toHaveBeenCalled();
+      expect(sf.fetchPendingTasks).not.toHaveBeenCalled();
     });
   });
 });

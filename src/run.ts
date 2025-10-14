@@ -3,15 +3,21 @@
  * Clean, testable design with proper separation of concerns
  */
 import type { Connection } from 'jsforce';
+import { randomUUID } from 'crypto';
+import { pathToFileURL } from 'url';
+import { promises as fs } from 'fs';
+import path from 'path';
 import pMap from 'p-map';
 import { getConfig } from './config.js';
-import { getLogger } from './logger.js';
+import { getLogger, withRid } from './logger.js';
 import * as sf from './sf.js';
-import { sendWhatsApp, type SendResult } from './glassix.js';
+import { sendWhatsApp } from './glassix.js';
 import { loadTemplateMap, pickTemplate, renderMessage } from './templates.js';
 import { todayIso, todayHe } from './utils/date.js';
 import { mask } from './phone.js';
 import type { NormalizedMapping } from './types.js';
+import { startMetricsServer, stopMetricsServer, updateRunStats, recordTaskResult } from './metrics.js';
+import { SalesforceTaskUpdater, buildFieldMap } from './sf-updater.js';
 
 const logger = getLogger();
 
@@ -19,129 +25,58 @@ const logger = getLogger();
  * Processing statistics
  */
 export interface RunStats {
-  total: number;
+  tasks: number;  // Renamed from 'total' for clarity
   sent: number;
   previewed: number;
   failed: number;
   skipped: number;
-  errors: Array<{ taskId: string; reason: string }>;
+  retryCount: number;  // Track total retry attempts
+  errors: Array<{ taskId: string; reason: string }>;  // Detailed error log
+  durationMs?: number;  // Run duration in milliseconds
 }
 
 /**
- * Maximum length for Task Description field in Salesforce
+ * Write metrics to JSONL file (opt-in via METRICS_PATH env var)
  */
-const MAX_DESCRIPTION_LENGTH = 32000;
-
-/**
- * Truncate string to max length
- */
-function truncate(s: string, maxLen = 1000): string {
-  if (s.length <= maxLen) {
-    return s;
-  }
-  return s.substring(0, maxLen);
-}
-
-/**
- * Mark task as completed with delivery details
- */
-async function completeTask(
-  conn: Connection,
-  taskId: string,
-  phoneE164: string,
-  sendResult: SendResult
-): Promise<void> {
-  const now = new Date().toISOString();
-  const maskedPhone = mask(phoneE164);
-  const providerId = sendResult.providerId ?? 'n/a';
-
-  // Append audit line to description
-  const auditLine = `[${now}] WhatsApp → ${maskedPhone} (provId=${providerId})`;
-
-  const glassixUrl =
-    sendResult.conversationUrl ||
-    `https://app.glassix.com/conversations/${providerId}`;
-
-  try {
-    // Fetch current Description using SOQL query
-    const { records } = await conn.query<{ Description?: string }>(
-      `SELECT Description FROM Task WHERE Id='${taskId}' LIMIT 1`
-    );
-    
-    const previous = records[0]?.Description ?? '';
-    
-    // Append audit line with newline separator and truncate to field limit
-    const combined = previous + '\n' + auditLine;
-    const newDesc = combined.slice(-MAX_DESCRIPTION_LENGTH);
-
-    await conn.sobject('Task').update({
-      Id: taskId,
-      Status: 'Completed',
-      Delivery_Status__c: 'SENT',
-      Last_Sent_At__c: now,
-      Glassix_Conversation_URL__c: glassixUrl,
-      Description: newDesc,
-    });
-
-    logger.debug({ taskId, maskedPhone, providerId }, 'Task marked completed');
-  } catch (error) {
-    // Check for INVALID_FIELD error and provide helpful guidance
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    
-    if (errorMsg.includes('INVALID_FIELD') || errorMsg.includes('No such column')) {
-      logger.error(
-        { taskId, error: errorMsg },
-        'Failed to update Task: Custom fields missing in Salesforce. ' +
-        'Please create these optional fields: Delivery_Status__c (Text), ' +
-        'Last_Sent_At__c (DateTime), Glassix_Conversation_URL__c (URL). ' +
-        'See README.md#salesforce-setup for details.'
-      );
-    } else {
-      logger.warn({ taskId, error: errorMsg }, 'Failed to update task to Completed (non-fatal)');
-    }
-    // Don't throw - message was sent successfully
-  }
-}
-
-/**
- * Mark task as failed with truncated safe error
- */
-async function failTask(
-  conn: Connection,
-  taskId: string,
-  reason: string
-): Promise<void> {
-  const config = getConfig();
+async function writeMetrics(stats: RunStats, startTime: number): Promise<void> {
+  const metricsPath = process.env.METRICS_PATH;
   
-  // Clean error: no stack traces, truncate to 1000 chars
-  const cleanReason = truncate(reason, 1000);
+  if (!metricsPath) {
+    // Metrics disabled
+    return;
+  }
 
   try {
-    await conn.sobject('Task').update({
-      Id: taskId,
-      Status: 'Waiting on External',
-      Failure_Reason__c: cleanReason,
-      // Conditionally preserve Ready_for_Automation__c flag
-      ...(config.KEEP_READY_ON_FAIL ? { Ready_for_Automation__c: true } : {}),
-    });
-
-    logger.debug({ taskId, reason: cleanReason }, 'Task marked failed');
-  } catch (error) {
-    // Check for INVALID_FIELD error
-    const errorMsg = error instanceof Error ? error.message : String(error);
+    const durationMs = Date.now() - startTime;
+    const isDryRun = process.env.DRY_RUN === '1';
     
-    if (errorMsg.includes('INVALID_FIELD') || errorMsg.includes('No such column')) {
-      logger.error(
-        { taskId, error: errorMsg },
-        'Failed to update Task: Custom fields missing in Salesforce. ' +
-        'Please create these optional fields: Failure_Reason__c (Text), ' +
-        'Ready_for_Automation__c (Checkbox). ' +
-        'See README.md#salesforce-setup for details.'
-      );
-    } else {
-      logger.warn({ taskId, error: errorMsg }, 'Failed to update task to Waiting (non-fatal)');
-    }
-    // Don't throw - continue processing other tasks
+    const metricsRecord = {
+      ts: new Date().toISOString(),
+      version: '1.0.0', // TODO: read from package.json dynamically
+      platform: process.platform,
+      mode: isDryRun ? 'dry-run' : 'live',
+      tasks: stats.tasks,
+      sent: stats.sent,
+      failed: stats.failed,
+      skipped: stats.skipped,
+      retryCount: stats.retryCount,
+      durationMs,
+    };
+
+    // Append as JSONL (one JSON object per line)
+    const jsonLine = JSON.stringify(metricsRecord) + '\n';
+    
+    // Ensure parent directory exists
+    const metricsDir = path.dirname(metricsPath);
+    await fs.mkdir(metricsDir, { recursive: true });
+    
+    // Append to file
+    await fs.appendFile(metricsPath, jsonLine, 'utf-8');
+    
+    logger.debug({ metricsPath }, 'Metrics written');
+  } catch (error) {
+    // Non-fatal: log but don't throw
+    logger.warn({ error, metricsPath: metricsPath }, 'Failed to write metrics');
   }
 }
 
@@ -149,11 +84,14 @@ async function failTask(
  * Main orchestration loop - processes all pending tasks once
  */
 export async function runOnce(): Promise<RunStats> {
+  const startTime = Date.now();
+  const rid = randomUUID();
+  const log = withRid(rid);
   const config = getConfig();
   const isDryRun = process.env.DRY_RUN === '1';
 
   // Step 1: Startup
-  logger.info(
+  log.info(
     {
       mode: config.GLASSIX_API_MODE,
       limit: config.TASKS_QUERY_LIMIT,
@@ -163,67 +101,155 @@ export async function runOnce(): Promise<RunStats> {
   );
 
   const stats: RunStats = {
-    total: 0,
+    tasks: 0,
     sent: 0,
     previewed: 0,
     failed: 0,
     skipped: 0,
+    retryCount: 0,
     errors: [],
   };
 
   let conn: Connection | null = null;
 
+  // Start metrics server if enabled
+  if (config.METRICS_ENABLED) {
+    try {
+      await startMetricsServer(config.METRICS_PORT);
+      log.info({ port: config.METRICS_PORT }, 'Metrics server started');
+    } catch (error) {
+      log.warn({ error }, 'Failed to start metrics server (non-fatal)');
+    }
+  }
+
   try {
     // Step 2: Load template map
     const templateMap = await loadTemplateMap();
-    logger.info({ templateCount: templateMap.size }, 'Templates loaded');
+    log.info({ templateCount: templateMap.size }, 'Templates loaded');
 
     // Step 3: Connect to Salesforce
     conn = await sf.login();
 
-    // Step 4: Fetch tasks (single SOQL - no N+1)
-    const tasks = await sf.fetchPendingTasks(conn);
-    stats.total = tasks.length;
+    // Step 3a: Probe Task fields to avoid INVALID_FIELD errors
+    const availableFields = await sf.describeTaskFields(conn);
 
-    if (tasks.length === 0) {
-      logger.info('No pending tasks');
-      return stats;
+    // Step 3b: Build field map for updater (once per run for performance)
+    const fieldMap = buildFieldMap(availableFields);
+
+    // Step 3c: Create Salesforce updater
+    const updater = new SalesforceTaskUpdater(conn, fieldMap, config);
+
+    // Step 4: Fetch tasks (single SOQL or paged depending on config)
+    if (config.PAGED) {
+      // Paged mode: process page by page
+      log.info('Using paged mode for task fetching');
+      
+      const connection = conn; // Assert non-null for closure
+      let pageNum = 0;
+      
+      for await (const taskPage of sf.fetchPendingTasksPaged(conn)) {
+        pageNum++;
+        const pageSize = taskPage.length;
+        
+        if (pageSize === 0) {
+          continue;
+        }
+        
+        stats.tasks += pageSize;
+        log.debug({ pageNum, pageSize, totalSoFar: stats.tasks }, 'Processing task page');
+        
+        // Process this page with concurrency
+        await pMap(
+          taskPage,
+          async (task) => {
+            try {
+              await processTask(connection, task, templateMap, config, stats, isDryRun, updater);
+            } catch (error: unknown) {
+              const reason = error instanceof Error ? error.message : String(error);
+              stats.failed++;
+              stats.errors.push({ taskId: task.Id, reason });
+              logger.error({ taskId: task.Id, error: reason }, 'Unexpected error processing task');
+
+              if (!isDryRun) {
+                await updater.markFailed(task.Id, reason);
+              }
+            }
+          },
+          { concurrency: 5 }
+        );
+      }
+      
+      if (stats.tasks === 0) {
+        log.info('No pending tasks');
+        return stats;
+      }
+    } else {
+      // Non-paged mode: single fetch (original behavior)
+      const tasks = await sf.fetchPendingTasks(conn);
+      stats.tasks = tasks.length;
+
+      if (tasks.length === 0) {
+        log.info('No pending tasks');
+        return stats;
+      }
+
+      // Step 5: Process each task with limited concurrency
+      const connection = conn; // Assert non-null for closure
+      await pMap(
+        tasks,
+        async (task) => {
+          try {
+            await processTask(connection, task, templateMap, config, stats, isDryRun, updater);
+          } catch (error: unknown) {
+            // Unexpected error during processing
+            const reason = error instanceof Error ? error.message : String(error);
+            stats.failed++;
+            stats.errors.push({ taskId: task.Id, reason });
+            logger.error({ taskId: task.Id, error: reason }, 'Unexpected error processing task');
+
+            if (!isDryRun) {
+              await updater.markFailed(task.Id, reason);
+            }
+          }
+        },
+        { concurrency: 5 }
+      );
     }
 
-    // Step 5: Process each task with limited concurrency
-    // Process up to 5 tasks concurrently to balance throughput and resource usage
-    const connection = conn; // Assert non-null for closure
-    await pMap(
-      tasks,
-      async (task) => {
-        try {
-          await processTask(connection, task, templateMap, config, stats, isDryRun);
-        } catch (error: unknown) {
-          // Unexpected error during processing
-          const reason = error instanceof Error ? error.message : String(error);
-          stats.failed++;
-          stats.errors.push({ taskId: task.Id, reason });
-          logger.error({ taskId: task.Id, error: reason }, 'Unexpected error processing task');
-
-          if (!isDryRun) {
-            await failTask(connection, task.Id, reason);
-          }
-        }
-      },
-      { concurrency: 5 }
-    );
-
     // Step 6: Report final stats
-    logger.info(stats, 'Processing completed');
+    log.info(stats, 'Processing completed');
+
+    // Update Prometheus metrics
+    updateRunStats({
+      tasks: stats.tasks,
+      sent: stats.sent,
+      failed: stats.failed,
+    });
 
     return stats;
   } catch (error: unknown) {
-    logger.error({ error }, 'Fatal error in runOnce');
+    log.error({ error }, 'Fatal error in runOnce');
     throw error;
   } finally {
     if (conn) {
       await conn.logout();
-      logger.info('Disconnected from Salesforce');
+      log.info('Disconnected from Salesforce');
+    }
+    
+    // Step 7: Write metrics (opt-in)
+    stats.durationMs = Date.now() - startTime;
+    await writeMetrics(stats, startTime);
+
+    // Stop metrics server if enabled (keep running for scraping)
+    // Note: In production, metrics server should stay running
+    // Only stop in CLI/one-shot mode
+    if (config.METRICS_ENABLED && process.env.METRICS_AUTO_STOP === 'true') {
+      try {
+        await stopMetricsServer();
+        log.info('Metrics server stopped');
+      } catch (error) {
+        log.warn({ error }, 'Failed to stop metrics server');
+      }
     }
   }
 }
@@ -232,12 +258,13 @@ export async function runOnce(): Promise<RunStats> {
  * Process a single task through the full pipeline
  */
 async function processTask(
-  conn: Connection,
+  _conn: Connection,
   task: sf.STask,
   templateMap: Map<string, NormalizedMapping>,
   config: ReturnType<typeof getConfig>,
   stats: RunStats,
-  isDryRun: boolean
+  isDryRun: boolean,
+  updater: SalesforceTaskUpdater
 ): Promise<void> {
   logger.debug({ taskId: task.Id, subject: task.Subject }, 'Processing task');
 
@@ -249,11 +276,12 @@ async function processTask(
   if (!mapping) {
     const reason = `Template not found: ${taskKey}`;
     stats.skipped++;
+    recordTaskResult('skipped');
     stats.errors.push({ taskId: task.Id, reason });
     logger.warn({ taskId: task.Id, taskKey }, reason);
 
     if (!isDryRun) {
-      await failTask(conn, task.Id, reason);
+      await updater.markFailed(task.Id, reason);
     }
     return;
   }
@@ -264,13 +292,27 @@ async function processTask(
   // Step d) Resolve target (phone + names)
   const target = sf.resolveTarget(task);
   if (!target.phoneE164) {
-    const reason = `Missing/invalid phone (source: ${target.source})`;
+    // Anti-enumeration: Generic user-facing message (no hints about phone vs other issues)
+    const userFacingReason = 'Unable to process task: contact information unavailable.';
+    
+    // Detailed reason for audit trail (masked, logged but not in stats.errors)
+    const auditReason = `Missing/invalid phone (source: ${target.source})`;
+    
     stats.skipped++;
-    stats.errors.push({ taskId: task.Id, reason });
-    logger.warn({ taskId: task.Id, taskKey, source: target.source }, reason);
+    recordTaskResult('skipped');
+    stats.errors.push({ taskId: task.Id, reason: userFacingReason });
+    
+    // Log detailed diagnostic info with masked phone (if any)
+    logger.warn({ 
+      taskId: task.Id, 
+      taskKey, 
+      source: target.source,
+      issue: 'phone_unavailable'
+    }, auditReason);
 
     if (!isDryRun) {
-      await failTask(conn, task.Id, reason);
+      // Store audit reason in Salesforce (for admin review)
+      await updater.markFailed(task.Id, auditReason);
     }
     return;
   }
@@ -318,6 +360,7 @@ async function processTask(
 
     // Step h) Success path
     stats.sent++;
+    recordTaskResult('sent');
     logger.info(
       {
         taskId: task.Id,
@@ -327,39 +370,46 @@ async function processTask(
       'Message sent'
     );
 
-    await completeTask(conn, task.Id, target.phoneE164, sendResult);
+    await updater.markCompleted(task.Id, { phoneE164: target.phoneE164, sendResult });
   } catch (error: unknown) {
     // Step i) Failure path
     const errorReason = error instanceof Error ? error.message : String(error);
     stats.failed++;
+    recordTaskResult('failed');
     stats.errors.push({ taskId: task.Id, reason: errorReason });
     logger.error(
       { taskId: task.Id, to: mask(target.phoneE164), error: errorReason },
       'Send failed'
     );
 
-    await failTask(conn, task.Id, errorReason);
+    await updater.markFailed(task.Id, errorReason);
   }
 }
 
 /**
  * Graceful shutdown handler
+ * Sets flag and schedules timeout, allowing in-flight work to complete
  */
 let isShuttingDown = false;
-function gracefulShutdown(signal: string): void {
+async function gracefulShutdown(signal: string): Promise<void> {
   if (isShuttingDown) {
     return;
   }
   isShuttingDown = true;
 
-  logger.info({ signal }, 'Graceful shutdown initiated');
+  logger.info({ signal }, 'Graceful shutdown initiated - waiting for in-flight operations');
 
-  // Give in-flight operations time to complete
-  setTimeout(() => {
+  // Schedule forced exit after timeout
+  const forceExitTimer = setTimeout(() => {
     logger.warn('Shutdown timeout reached, forcing exit');
     process.exit(1);
   }, 10000); // 10 second timeout
 
+  // Wait a moment for in-flight operations to complete
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+
+  clearTimeout(forceExitTimer);
+  logger.info('Graceful shutdown completed');
   process.exit(0);
 }
 
@@ -395,7 +445,8 @@ function setupErrorHandlers(): void {
 }
 
 // CLI entry point: run once and exit
-if (import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}`) {
+// Use pathToFileURL for correct cross-platform comparison
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   // Setup error handlers first
   setupErrorHandlers();
 

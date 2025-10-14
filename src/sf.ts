@@ -121,6 +121,60 @@ export async function login(): Promise<Connection> {
 }
 
 /**
+ * Task field set type (exported for type safety in orchestrator)
+ */
+export type TaskFieldSet = Set<string>;
+
+/**
+ * Describe Task object and return available custom field names
+ * Probes for optional automation fields at startup to avoid INVALID_FIELD errors
+ */
+export async function describeTaskFields(conn: Connection): Promise<TaskFieldSet> {
+  try {
+    const description = await conn.describeSObject('Task');
+    
+    // Extract all field API names
+    const allFields = new Set<string>(
+      description.fields.map((field) => field.name)
+    );
+
+    // Check which optional automation fields exist
+    const optionalFields = [
+      'Delivery_Status__c',
+      'Last_Sent_At__c',
+      'Glassix_Conversation_URL__c',
+      'Failure_Reason__c',
+      'Ready_for_Automation__c',
+      'Audit_Trail__c',
+    ];
+
+    const availableOptionalFields = optionalFields.filter((field) => allFields.has(field));
+    const missingOptionalFields = optionalFields.filter((field) => !allFields.has(field));
+
+    logger.info(
+      {
+        available: availableOptionalFields,
+        missing: missingOptionalFields,
+      },
+      'Task custom fields probed'
+    );
+
+    if (missingOptionalFields.length > 0) {
+      logger.warn(
+        { missing: missingOptionalFields },
+        'Some optional Task fields are missing - updates will use available fields only. ' +
+        'See README.md#salesforce-setup to create these fields for full functionality.'
+      );
+    }
+
+    return allFields;
+  } catch (error) {
+    logger.error({ error }, 'Failed to describe Task object');
+    throw new Error('Could not describe Task object - check Salesforce permissions');
+  }
+}
+
+/**
  * Fetch pending tasks using a single SOQL with TYPEOF
  */
 export async function fetchPendingTasks(
@@ -160,6 +214,63 @@ export async function fetchPendingTasks(
   );
 
   return result.records;
+}
+
+/**
+ * Fetch pending tasks with paging support using AsyncGenerator
+ * Yields pages of tasks until all are fetched
+ * Use this for large batches to avoid memory issues
+ * Note: No LIMIT clause to allow queryMore to drain the entire cursor
+ */
+export async function* fetchPendingTasksPaged(
+  conn: Connection,
+  pageSize?: number
+): AsyncGenerator<STask[], void, undefined> {
+  const config = getConfig();
+  const batchSize = pageSize ?? config.TASKS_QUERY_LIMIT;
+  const customPhone = config.TASK_CUSTOM_PHONE_FIELD;
+
+  // Build SOQL without LIMIT to allow queryMore to drain cursor
+  // Salesforce will return batchSize records per page automatically
+  const soql = `
+    SELECT Id, Subject, Status, ActivityDate, Description,
+           ${customPhone},
+           Task_Type_Key__c, Message_Template_Key__c, Context_JSON__c,
+           TYPEOF Who
+             WHEN Contact THEN FirstName, LastName, MobilePhone, Phone, Account.Name
+             WHEN Lead    THEN FirstName, LastName, MobilePhone, Phone
+           END,
+           TYPEOF What
+             WHEN Account THEN Name, Phone
+           END
+    FROM Task
+    WHERE Ready_for_Automation__c = true
+      AND Status IN ('Not Started', 'In Progress')
+    ORDER BY CreatedDate ASC
+  `;
+
+  logger.debug({ pageSize: batchSize, customPhone }, 'Starting paged task fetch');
+
+  let result = await conn.query<STask>(soql);
+  let totalFetched = 0;
+  let pageNum = 1;
+
+  // Yield first page
+  totalFetched += result.records.length;
+  logger.debug({ pageNum, count: result.records.length, totalFetched }, 'Fetched task page');
+  yield result.records;
+
+  // Continue fetching additional pages while more records exist
+  while (!result.done && result.nextRecordsUrl) {
+    pageNum++;
+    result = await conn.queryMore<STask>(result.nextRecordsUrl);
+    totalFetched += result.records.length;
+    
+    logger.debug({ pageNum, count: result.records.length, totalFetched }, 'Fetched task page');
+    yield result.records;
+  }
+
+  logger.info({ totalFetched, pages: pageNum }, 'Completed paged task fetch');
 }
 
 /**
@@ -286,8 +397,8 @@ export function resolveTarget(t: STask): TargetResolution {
     accountName = t.What.Name ?? undefined;
   }
 
-  // Normalize phone to E.164
-  const phoneE164 = phoneRaw ? normalizeE164(phoneRaw, 'IL') : null;
+  // Normalize phone to E.164 (with config-controlled landline permission)
+  const phoneE164 = phoneRaw ? normalizeE164(phoneRaw, 'IL', config.PERMIT_LANDLINES) : null;
 
   // Log with masked phone
   logger.debug(

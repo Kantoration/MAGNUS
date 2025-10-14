@@ -1,14 +1,30 @@
 /**
  * Excel template loader and message renderer with Hebrew column support
+ * Includes worker-based loading for large files to prevent event-loop blocking
  */
 import XLSX from 'xlsx';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { Worker } from 'worker_threads';
+import { fileURLToPath } from 'url';
 import { getConfig } from './config.js';
 import { getLogger } from './logger.js';
 import { todayIso, todayHe } from './utils/date.js';
 import type { Logger } from 'pino';
 import type { RawMappingRow, NormalizedMapping, RenderContext } from './types.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+/**
+ * Threshold for offloading to worker thread (1MB)
+ */
+const LARGE_FILE_THRESHOLD = 1_000_000;
+
+/**
+ * Default timeout for XLSX parsing (30 seconds)
+ */
+const PARSE_TIMEOUT_MS = 30_000;
 
 /**
  * Excel header constants with exact Hebrew keys
@@ -52,9 +68,6 @@ function normalizeHeaderKey(key: string): string {
   return trimmedKey;
 }
 
-// Cache for template map with mtime tracking
-let cachedTemplateMap: Map<string, NormalizedMapping> | null = null;
-let cachedMtime: number | null = null;
 let logger: Logger | undefined;
 
 function log(level: 'debug' | 'info' | 'warn' | 'error', obj: object, msg: string): void {
@@ -62,6 +75,310 @@ function log(level: 'debug' | 'info' | 'warn' | 'error', obj: object, msg: strin
     logger = getLogger();
   }
   logger[level](obj, msg);
+}
+
+/**
+ * TemplateManager singleton for concurrency-safe caching
+ */
+class TemplateManager {
+  private static instance: TemplateManager | null = null;
+  private cache: Map<string, NormalizedMapping> | null = null;
+  private cachedMtime: number | null = null;
+  private loading: Promise<Map<string, NormalizedMapping>> | null = null;
+
+  private constructor() {}
+
+  /**
+   * Get singleton instance
+   */
+  static getInstance(): TemplateManager {
+    if (!TemplateManager.instance) {
+      TemplateManager.instance = new TemplateManager();
+    }
+    return TemplateManager.instance;
+  }
+
+  /**
+   * Load templates from file (with caching and concurrency safety)
+   */
+  async load(filePath?: string): Promise<Map<string, NormalizedMapping>> {
+    const config = getConfig();
+    const actualPath = filePath ?? config.XSLX_MAPPING_PATH;
+
+    // Check if file exists and get stats
+    let stats;
+    try {
+      stats = await fs.stat(actualPath);
+    } catch {
+      log('error', { filePath: actualPath }, 'Template mapping file not found');
+      throw new Error(`Template mapping file not found: ${actualPath}`);
+    }
+
+    const currentMtime = stats.mtimeMs;
+
+    // Return cached version if file hasn't changed and not using custom path
+    if (!filePath && this.cache && this.cachedMtime === currentMtime) {
+      log('debug', {}, 'Using cached template map (file unchanged)');
+      return this.cache;
+    }
+
+    // If already loading, wait for that to complete (concurrency safety)
+    if (this.loading) {
+      log('debug', {}, 'Template load already in progress, waiting...');
+      return this.loading;
+    }
+
+    // Start loading
+    this.loading = this.loadFromFile(actualPath, stats, currentMtime, !filePath);
+
+    try {
+      const result = await this.loading;
+      return result;
+    } finally {
+      this.loading = null;
+    }
+  }
+
+  /**
+   * Get cached templates (throws if not loaded)
+   */
+  get(): Map<string, NormalizedMapping> {
+    if (!this.cache) {
+      throw new Error('Templates not loaded. Call load() first.');
+    }
+    return this.cache;
+  }
+
+  /**
+   * Clear cache (for testing)
+   */
+  clearCache(): void {
+    this.cache = null;
+    this.cachedMtime = null;
+  }
+
+  /**
+   * Internal: Load from file with worker offloading for large files
+   */
+  private async loadFromFile(
+    filePath: string,
+    stats: Awaited<ReturnType<typeof fs.stat>>,
+    mtime: number,
+    shouldCache: boolean
+  ): Promise<Map<string, NormalizedMapping>> {
+    const config = getConfig();
+    const absolutePath = path.resolve(filePath);
+    const fileSize = stats.size;
+
+    log('info', { absolutePath, mtime, fileSize }, 'Loading template mappings');
+
+    try {
+      let data: unknown[];
+      let sheetName: string | undefined;
+
+      // For large files, offload to worker thread
+      if (fileSize > LARGE_FILE_THRESHOLD) {
+        log('info', { fileSize, threshold: LARGE_FILE_THRESHOLD }, 'Using worker thread for large file');
+        const result = await this.parseWithWorker(filePath, config.XSLX_SHEET);
+        data = result.data;
+        sheetName = result.sheetName;
+      } else {
+        // Small files: parse inline
+        const result = await this.parseInline(filePath, config.XSLX_SHEET);
+        data = result.data;
+        sheetName = result.sheetName;
+      }
+
+      log('debug', { rowCount: data.length, sheet: sheetName }, 'Parsed Excel data');
+
+      // Validate and build template map
+      const templateMap = this.buildTemplateMap(data as RawMappingRow[]);
+
+      // Update cache if not using custom path
+      if (shouldCache) {
+        this.cache = templateMap;
+        this.cachedMtime = mtime;
+      }
+
+      log('info', { count: templateMap.size }, 'Template mappings loaded successfully');
+
+      return templateMap;
+    } catch (error: unknown) {
+      log('error', { filePath, error }, 'Failed to load template mappings');
+      throw error;
+    }
+  }
+
+  /**
+   * Parse XLSX using worker thread with timeout
+   */
+  private async parseWithWorker(
+    filePath: string,
+    sheetSelector?: string
+  ): Promise<{ data: unknown[]; sheetName: string }> {
+    return new Promise((resolve, reject) => {
+      const workerPath = path.join(__dirname, 'workers', 'xlsx_loader.js');
+      
+      const worker = new Worker(workerPath, {
+        workerData: { filePath, sheetSelector },
+      });
+
+      let timeoutId: NodeJS.Timeout | null = null;
+      let completed = false;
+
+      // Set timeout
+      timeoutId = setTimeout(() => {
+        if (!completed) {
+          completed = true;
+          worker.terminate();
+          reject(new Error(`Template load timeout (exceeded ${PARSE_TIMEOUT_MS}ms)`));
+        }
+      }, PARSE_TIMEOUT_MS);
+
+      worker.on('message', (result: { success: boolean; data?: unknown[]; sheetName?: string; error?: string }) => {
+        if (completed) return;
+        completed = true;
+
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+
+        worker.terminate();
+
+        if (result.success && result.data && result.sheetName) {
+          resolve({ data: result.data, sheetName: result.sheetName });
+        } else {
+          reject(new Error(result.error || 'Worker parsing failed'));
+        }
+      });
+
+      worker.on('error', (error) => {
+        if (completed) return;
+        completed = true;
+
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+
+        worker.terminate();
+        reject(error);
+      });
+
+      worker.on('exit', (code) => {
+        if (completed) return;
+        completed = true;
+
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+
+        if (code !== 0) {
+          reject(new Error(`Worker stopped with exit code ${code}`));
+        }
+      });
+    });
+  }
+
+  /**
+   * Parse XLSX inline (for small files)
+   */
+  private async parseInline(
+    filePath: string,
+    sheetSelector?: string
+  ): Promise<{ data: unknown[]; sheetName: string }> {
+    const fileBuffer = await fs.readFile(filePath);
+    const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+
+    let targetSheet: XLSX.WorkSheet | undefined;
+    let targetSheetName: string | undefined;
+
+    if (sheetSelector) {
+      const sheetIndex = parseInt(sheetSelector, 10);
+      
+      if (!isNaN(sheetIndex)) {
+        targetSheetName = workbook.SheetNames[sheetIndex];
+        if (targetSheetName) {
+          targetSheet = workbook.Sheets[targetSheetName];
+          log('debug', { sheetIndex, sheetName: targetSheetName }, 'Using sheet by index');
+        }
+      } else {
+        targetSheetName = sheetSelector;
+        targetSheet = workbook.Sheets[sheetSelector];
+        if (targetSheet) {
+          log('debug', { sheetName: sheetSelector }, 'Using sheet by name');
+        }
+      }
+      
+      if (!targetSheet) {
+        throw new Error(
+          `Sheet "${sheetSelector}" not found. Available sheets: ${workbook.SheetNames.join(', ')}`
+        );
+      }
+    } else {
+      targetSheetName = workbook.SheetNames[0];
+      targetSheet = workbook.Sheets[targetSheetName];
+      log('debug', { sheetName: targetSheetName }, 'Using first sheet (default)');
+    }
+
+    if (!targetSheet) {
+      throw new Error('Excel file has no sheets');
+    }
+
+    const data = XLSX.utils.sheet_to_json(targetSheet, {
+      defval: '',
+    });
+
+    return { data, sheetName: targetSheetName };
+  }
+
+  /**
+   * Build template map from parsed data
+   */
+  private buildTemplateMap(data: RawMappingRow[]): Map<string, NormalizedMapping> {
+    // Validate headers
+    validateHeaders(data);
+
+    const templateMap = new Map<string, NormalizedMapping>();
+
+    for (const row of data) {
+      const normalizedRow = normalizeRowKeys(row as unknown as Record<string, unknown>) as RawMappingRow;
+      
+      const name = normalizedRow[HEADERS.NAME];
+      const bodyHe = normalizedRow[HEADERS.BODY_HE];
+      const link = normalizedRow[HEADERS.LINK];
+      const glassixName = normalizedRow[HEADERS.GLASSIX_NAME];
+
+      if (!name?.trim() || !bodyHe?.trim()) {
+        continue;
+      }
+
+      const taskKey = normalizeTaskKey(name);
+      const messageBody = bodyHe.trim() || undefined;
+      const linkValue = link?.trim() || undefined;
+      const glassixTemplateId = glassixName?.trim() || undefined;
+
+      const mapping: NormalizedMapping = {
+        taskKey,
+        messageBody,
+        link: linkValue,
+        glassixTemplateId,
+      };
+
+      templateMap.set(taskKey, mapping);
+
+      log(
+        'debug',
+        {
+          original: name,
+          taskKey,
+          hasGlassixTemplate: !!glassixTemplateId,
+        },
+        'Loaded template mapping'
+      );
+    }
+
+    return templateMap;
+  }
 }
 
 /**
@@ -199,146 +516,31 @@ function validateHeaders(data: unknown[]): void {
 
 /**
  * Load and parse the Excel template mapping file
+ * Uses TemplateManager singleton for caching and worker offloading
  * @param customPath Optional custom file path (for testing)
  */
 export async function loadTemplateMap(
   customPath?: string
 ): Promise<Map<string, NormalizedMapping>> {
-  const config = getConfig();
-  const filePath = customPath ?? config.XSLX_MAPPING_PATH;
+  const manager = TemplateManager.getInstance();
+  return manager.load(customPath);
+}
 
-  // Check if file exists and get stats
-  let stats;
-  try {
-    stats = await fs.stat(filePath);
-  } catch {
-    log('error', { filePath }, 'Template mapping file not found');
-    throw new Error(`Template mapping file not found: ${filePath}`);
+/**
+ * Extract unique placeholders from text
+ * Fixes bug: returns array instead of [Set]
+ */
+export function extractPlaceholders(text: string): string[] {
+  const placeholderRegex = /\{\{?(\w+)\}?\}/g;
+  const matches: string[] = [];
+  
+  let match;
+  while ((match = placeholderRegex.exec(text)) !== null) {
+    matches.push(match[1]);
   }
-
-  // Check mtime - use cache if file hasn't changed (skip cache if custom path provided)
-  const currentMtime = stats.mtimeMs;
-
-  if (!customPath && cachedTemplateMap && cachedMtime === currentMtime) {
-    log('debug', {}, 'Using cached template map (file unchanged)');
-    return cachedTemplateMap;
-  }
-
-  // Log absolute path for clarity
-  const absolutePath = path.resolve(filePath);
-  log('info', { absolutePath, mtime: currentMtime }, 'Loading template mappings');
-
-  try {
-    // Read file as raw buffer to ensure proper encoding
-    const fileBuffer = await fs.readFile(filePath);
-    const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
-
-    // Determine which sheet to use
-    let targetSheet: XLSX.WorkSheet | undefined;
-    let targetSheetName: string | undefined;
-    
-    const sheetSelector = config.XSLX_SHEET;
-    
-    if (sheetSelector) {
-      // Try to parse as index first
-      const sheetIndex = parseInt(sheetSelector, 10);
-      
-      if (!isNaN(sheetIndex)) {
-        // Use numeric index
-        targetSheetName = workbook.SheetNames[sheetIndex];
-        if (targetSheetName) {
-          targetSheet = workbook.Sheets[targetSheetName];
-          log('debug', { sheetIndex, sheetName: targetSheetName }, 'Using sheet by index');
-        }
-      } else {
-        // Use sheet name
-        targetSheetName = sheetSelector;
-        targetSheet = workbook.Sheets[sheetSelector];
-        if (targetSheet) {
-          log('debug', { sheetName: sheetSelector }, 'Using sheet by name');
-        }
-      }
-      
-      if (!targetSheet) {
-        throw new Error(
-          `Sheet "${sheetSelector}" not found. Available sheets: ${workbook.SheetNames.join(', ')}`
-        );
-      }
-    } else {
-      // Use first sheet by default
-      targetSheetName = workbook.SheetNames[0];
-      targetSheet = workbook.Sheets[targetSheetName];
-      log('debug', { sheetName: targetSheetName }, 'Using first sheet (default)');
-    }
-
-    if (!targetSheet) {
-      throw new Error('Excel file has no sheets');
-    }
-
-    const data = XLSX.utils.sheet_to_json<RawMappingRow>(targetSheet, {
-      defval: '',
-    });
-
-    log('debug', { rowCount: data.length, sheet: targetSheetName }, 'Parsed Excel data');
-
-    // Validate headers
-    validateHeaders(data);
-
-    const templateMap = new Map<string, NormalizedMapping>();
-
-    for (const row of data) {
-      // Normalize row keys to handle header aliases
-      const normalizedRow = normalizeRowKeys(row as unknown as Record<string, unknown>) as RawMappingRow;
-      
-      // Access via explicit header constants (after normalization)
-      const name = normalizedRow[HEADERS.NAME];
-      const bodyHe = normalizedRow[HEADERS.BODY_HE];
-      const link = normalizedRow[HEADERS.LINK];
-      const glassixName = normalizedRow[HEADERS.GLASSIX_NAME];
-
-      // Skip empty rows (no name or message body)
-      if (!name?.trim() || !bodyHe?.trim()) {
-        continue;
-      }
-
-      const taskKey = normalizeTaskKey(name);
-      const messageBody = bodyHe.trim() || undefined;
-      const linkValue = link?.trim() || undefined;
-      const glassixTemplateId = glassixName?.trim() || undefined;
-
-      const mapping: NormalizedMapping = {
-        taskKey,
-        messageBody,
-        link: linkValue,
-        glassixTemplateId,
-      };
-
-      templateMap.set(taskKey, mapping);
-
-      log(
-        'debug',
-        {
-          original: name,
-          taskKey,
-          hasGlassixTemplate: !!glassixTemplateId,
-        },
-        'Loaded template mapping'
-      );
-    }
-
-    // Update cache (only if not using custom path)
-    if (!customPath) {
-      cachedTemplateMap = templateMap;
-      cachedMtime = currentMtime;
-    }
-
-    log('info', { count: templateMap.size }, 'Template mappings loaded successfully');
-
-    return templateMap;
-  } catch (error: unknown) {
-    log('error', { filePath, error }, 'Failed to load template mappings');
-    throw error;
-  }
+  
+  // Return unique array (bug fix: was returning [new Set(...)])
+  return Array.from(new Set(matches));
 }
 
 /**
@@ -439,7 +641,7 @@ export function renderMessage(
  * Clear the template cache (useful for testing)
  */
 export function clearTemplateCache(): void {
-  cachedTemplateMap = null;
-  cachedMtime = null;
+  const manager = TemplateManager.getInstance();
+  manager.clearCache();
   log('debug', {}, 'Template cache cleared');
 }

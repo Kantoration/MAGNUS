@@ -1,322 +1,197 @@
 /**
- * Unit tests for robust Glassix client
+ * Tests for Glassix client - API modes, retry logic, idempotency, response parsing
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import axios from 'axios';
-import { sendWhatsApp, type SendParams } from '../src/glassix.js';
-
-// Need to set env vars before importing config
-process.env.SF_LOGIN_URL = 'https://login.salesforce.com';
-process.env.SF_USERNAME = 'test@example.com';
-process.env.SF_PASSWORD = 'password';
-process.env.SF_TOKEN = 'token';
-process.env.GLASSIX_BASE_URL = 'https://api.glassix.com';
-process.env.GLASSIX_API_KEY = 'test-api-key';
-process.env.GLASSIX_API_MODE = 'messages';
-
-// Mock axios
-vi.mock('axios', () => ({
-  default: {
-    create: vi.fn(),
-    isAxiosError: vi.fn(),
-  },
-  isAxiosError: vi.fn(),
-}));
+import MockAdapter from 'axios-mock-adapter';
+import { sendWhatsApp } from '../src/glassix.js';
+import { clearConfigCache } from '../src/config.js';
 
 describe('Glassix Client', () => {
-  let mockPost: ReturnType<typeof vi.fn>;
-  let originalEnv: NodeJS.ProcessEnv;
+  let mock: MockAdapter;
+  const originalEnv = process.env;
 
   beforeEach(() => {
-    vi.clearAllMocks();
-    originalEnv = { ...process.env };
+    // Reset environment
+    process.env = { ...originalEnv };
+    process.env.GLASSIX_BASE_URL = 'https://api.glassix.com';
+    process.env.GLASSIX_API_KEY = 'test-api-key';
+    process.env.GLASSIX_API_MODE = 'messages';
+    process.env.GLASSIX_TIMEOUT_MS = '15000';
+    process.env.SF_LOGIN_URL = 'https://login.salesforce.com';
+    process.env.SF_USERNAME = 'test@example.com';
+    process.env.SF_PASSWORD = 'password';
+    process.env.SF_TOKEN = 'token';
+    process.env.RETRY_ATTEMPTS = '3';
+    process.env.RETRY_BASE_MS = '300';
+    process.env.LOG_LEVEL = 'error';
+    delete process.env.DRY_RUN;
+    delete process.env.GLASSIX_API_SECRET;
 
-    // Mock axios.create
-    mockPost = vi.fn();
-    (axios.create as any).mockReturnValue({
-      post: mockPost,
-    });
+    clearConfigCache();
 
-    // Mock axios.isAxiosError - important to make it actually check
-    (axios.isAxiosError as any).mockImplementation((error: any) => {
-      return error && error.isAxiosError === true;
-    });
+    // Mock axios
+    mock = new MockAdapter(axios);
   });
 
   afterEach(() => {
     process.env = originalEnv;
-    vi.restoreAllMocks();
+    clearConfigCache();
+    mock.restore();
   });
 
   describe('DRY_RUN mode', () => {
-    it('should return dry-run providerId without making network call', async () => {
+    it('should return dry-run providerId without making API call', async () => {
       process.env.DRY_RUN = '1';
+      clearConfigCache();
 
-      const params: SendParams = {
+      const result = await sendWhatsApp({
         toE164: '+972521234567',
         text: 'Test message',
         idemKey: 'task-123',
-      };
-
-      const result = await sendWhatsApp(params);
+      });
 
       expect(result.providerId).toBe('dry-run');
       expect(result.conversationUrl).toBeUndefined();
-      expect(mockPost).not.toHaveBeenCalled();
     });
 
-    it('should log intent with masked phone in DRY_RUN mode', async () => {
+    it('should log masked phone number in DRY_RUN mode', async () => {
       process.env.DRY_RUN = '1';
+      clearConfigCache();
 
-      const params: SendParams = {
+      // Just verify it doesn't throw
+      const result = await sendWhatsApp({
         toE164: '+972521234567',
-        text: 'Test message with template',
-        idemKey: 'task-456',
-        templateId: 'welcome_template',
-      };
-
-      const result = await sendWhatsApp(params);
+        text: 'Test',
+        idemKey: 'task-123',
+      });
 
       expect(result.providerId).toBe('dry-run');
-      expect(mockPost).not.toHaveBeenCalled();
     });
   });
 
   describe('Phone validation', () => {
-    it('should throw error for non-+972 phone numbers', async () => {
-      const params: SendParams = {
-        toE164: '+1234567890',
-        text: 'Test',
-        idemKey: 'task-789',
-      };
-
-      await expect(sendWhatsApp(params)).rejects.toThrow(
-        /Invalid phone number format.*Must start with \+972/
-      );
+    it('should reject non-+972 numbers', async () => {
+      await expect(
+        sendWhatsApp({
+          toE164: '+1234567890',
+          text: 'Test',
+          idemKey: 'task-123',
+        })
+      ).rejects.toThrow('Invalid phone: only +972 E.164 numbers are supported');
     });
 
-    it('should accept valid +972 phone numbers', async () => {
-      mockPost.mockResolvedValue({
-        data: { id: 'msg-123', conversationUrl: 'https://app.glassix.com/c/123' },
-      });
+    it('should accept valid +972 numbers', async () => {
+      mock
+        .onPost(/\/api\/messages$/)
+        .reply(200, { id: 'msg-123', conversationUrl: 'https://glassix.com/conv/123' });
 
-      const params: SendParams = {
+      const result = await sendWhatsApp({
         toE164: '+972521234567',
         text: 'Test',
-        idemKey: 'task-valid',
-      };
-
-      const result = await sendWhatsApp(params);
+        idemKey: 'task-123',
+      });
 
       expect(result.providerId).toBe('msg-123');
-      expect(mockPost).toHaveBeenCalled();
     });
   });
 
   describe('Retry logic', () => {
     it('should retry on 429 and succeed on second attempt', async () => {
-      const error429 = {
-        isAxiosError: true,
-        name: 'AxiosError',
-        response: {
-          status: 429,
-          statusText: 'Too Many Requests',
-          data: { message: 'Rate limit exceeded' },
-          headers: {},
-          config: {} as any,
-        },
-        code: 'ERR_BAD_REQUEST',
-        message: 'Request failed with status code 429',
-        config: {} as any,
-        toJSON: () => ({}),
-      };
+      mock
+        .onPost(/\/api\/messages$/)
+        .replyOnce(429, { error: 'Rate limit exceeded' })
+        .onPost(/\/api\/messages$/)
+        .replyOnce(200, { id: 'msg-success', conversationUrl: 'https://glassix.com/conv/1' });
 
-      // First call fails with 429, second succeeds
-      mockPost
-        .mockRejectedValueOnce(error429)
-        .mockResolvedValueOnce({
-          data: { id: 'msg-retry-success', conversationUrl: 'https://app.glassix.com/c/456' },
-        });
-
-      const params: SendParams = {
+      const result = await sendWhatsApp({
         toE164: '+972521234567',
-        text: 'Retry test',
+        text: 'Test',
         idemKey: 'task-retry',
-      };
+      });
 
-      const result = await sendWhatsApp(params);
-
-      expect(result.providerId).toBe('msg-retry-success');
-      expect(mockPost).toHaveBeenCalledTimes(2);
+      expect(result.providerId).toBe('msg-success');
+      expect(mock.history.post).toHaveLength(2);
     });
 
     it('should retry on 503 with exponential backoff', async () => {
-      const error503 = {
-        isAxiosError: true,
-        name: 'AxiosError',
-        response: {
-          status: 503,
-          statusText: 'Service Unavailable',
-          data: { message: 'Service temporarily unavailable' },
-          headers: {},
-          config: {} as any,
-        },
-        code: 'ERR_BAD_RESPONSE',
-        message: 'Request failed with status code 503',
-        config: {} as any,
-        toJSON: () => ({}),
-      };
+      mock
+        .onPost(/\/api\/messages$/)
+        .replyOnce(503, { error: 'Service unavailable' })
+        .onPost(/\/api\/messages$/)
+        .replyOnce(503, { error: 'Service unavailable' })
+        .onPost(/\/api\/messages$/)
+        .replyOnce(200, { id: 'msg-final' });
 
-      // Fail twice, succeed on third
-      mockPost
-        .mockRejectedValueOnce(error503)
-        .mockRejectedValueOnce(error503)
-        .mockResolvedValueOnce({
-          data: { id: 'msg-backoff-success' },
-        });
+      const result = await sendWhatsApp({
+        toE164: '+972521234567',
+        text: 'Test',
+        idemKey: 'task-503',
+      });
 
-      const params: SendParams = {
-        toE164: '+972529876543',
-        text: 'Backoff test',
-        idemKey: 'task-backoff',
-      };
-
-      const result = await sendWhatsApp(params);
-
-      expect(result.providerId).toBe('msg-backoff-success');
-      expect(mockPost).toHaveBeenCalledTimes(3);
+      expect(result.providerId).toBe('msg-final');
+      expect(mock.history.post).toHaveLength(3);
     });
 
     it('should throw after max retries exhausted', async () => {
-      const error502 = {
-        isAxiosError: true,
-        name: 'AxiosError',
-        response: {
-          status: 502,
-          statusText: 'Bad Gateway',
-          data: { message: 'Gateway error' },
-          headers: {},
-          config: {} as any,
-        },
-        code: 'ERR_BAD_RESPONSE',
-        message: 'Request failed with status code 502',
-        config: {} as any,
-        toJSON: () => ({}),
-      };
+      mock.onPost(/\/api\/messages$/).reply(502, { error: 'Bad Gateway' });
 
-      // Fail all 3 attempts
-      mockPost.mockRejectedValue(error502);
+      await expect(
+        sendWhatsApp({
+          toE164: '+972521234567',
+          text: 'Test',
+          idemKey: 'task-fail',
+        })
+      ).rejects.toThrow(/502/);
 
-      const params: SendParams = {
-        toE164: '+972521112222',
-        text: 'Fail test',
-        idemKey: 'task-fail',
-      };
-
-      await expect(sendWhatsApp(params)).rejects.toThrow(/502 Bad Gateway/);
-      expect(mockPost).toHaveBeenCalledTimes(3);
+      expect(mock.history.post).toHaveLength(3);
     });
 
     it('should not retry on 400 bad request', async () => {
-      const error400 = {
-        isAxiosError: true,
-        name: 'AxiosError',
-        response: {
-          status: 400,
-          statusText: 'Bad Request',
-          data: { message: 'Invalid phone number' },
-          headers: {},
-          config: {} as any,
-        },
-        code: 'ERR_BAD_REQUEST',
-        message: 'Request failed with status code 400',
-        config: {} as any,
-        toJSON: () => ({}),
-      };
+      mock.onPost(/\/api\/messages$/).reply(400, { error: 'Bad Request' });
 
-      mockPost.mockRejectedValue(error400);
+      await expect(
+        sendWhatsApp({
+          toE164: '+972521234567',
+          text: 'Test',
+          idemKey: 'task-400',
+        })
+      ).rejects.toThrow(/400/);
 
-      const params: SendParams = {
-        toE164: '+972521234567',
-        text: 'Bad request test',
-        idemKey: 'task-400',
-      };
-
-      await expect(sendWhatsApp(params)).rejects.toThrow(/400 Bad Request/);
-      expect(mockPost).toHaveBeenCalledTimes(1); // No retries
+      expect(mock.history.post).toHaveLength(1); // No retries
     });
   });
 
   describe('Error message safety', () => {
     it('should truncate long error messages to 500 chars', async () => {
-      const longMessage = 'Error: ' + 'x'.repeat(1000);
-
-      const error = {
-        isAxiosError: true,
-        name: 'AxiosError',
-        response: {
-          status: 500,
-          statusText: 'Internal Server Error',
-          data: { message: longMessage },
-          headers: {},
-          config: {} as any,
-        },
-        code: 'ERR_BAD_RESPONSE',
-        message: 'Request failed',
-        config: {} as any,
-        toJSON: () => ({}),
-      };
-
-      mockPost.mockRejectedValue(error);
-
-      const params: SendParams = {
-        toE164: '+972521234567',
-        text: 'Test',
-        idemKey: 'task-long-error',
-      };
+      const longError = 'x'.repeat(1000);
+      mock.onPost(/\/api\/messages$/).reply(500, { error: longError });
 
       try {
-        await sendWhatsApp(params);
+        await sendWhatsApp({
+          toE164: '+972521234567',
+          text: 'Test',
+          idemKey: 'task-long',
+        });
         expect.fail('Should have thrown');
       } catch (error: any) {
-        expect(error.message).toContain('... (truncated)');
-        expect(error.message.length).toBeLessThan(600); // status + text + truncated message
+        expect(error.message).toContain('…');
+        expect(error.message.length).toBeLessThan(600);
       }
     });
 
     it('should not expose authorization headers in error messages', async () => {
-      const error = {
-        isAxiosError: true,
-        name: 'AxiosError',
-        response: {
-          status: 401,
-          statusText: 'Unauthorized',
-          data: { message: 'Invalid API key' },
-          headers: {
-            authorization: 'Bearer secret-key-12345',
-          },
-          config: {
-            headers: {
-              Authorization: 'Bearer secret-key-12345',
-            },
-          } as any,
-        },
-        code: 'ERR_BAD_REQUEST',
-        message: 'Request failed',
-        config: {} as any,
-        toJSON: () => ({}),
-      };
-
-      mockPost.mockRejectedValue(error);
-
-      const params: SendParams = {
-        toE164: '+972521234567',
-        text: 'Test',
-        idemKey: 'task-401',
-      };
+      mock.onPost(/\/api\/messages$/).reply(401, {
+        error: 'Unauthorized',
+        authorization: 'Bearer secret-key',
+      });
 
       try {
-        await sendWhatsApp(params);
+        await sendWhatsApp({
+          toE164: '+972521234567',
+          text: 'Test',
+          idemKey: 'task-401',
+        });
         expect.fail('Should have thrown');
       } catch (error: any) {
         expect(error.message).not.toContain('secret-key');
@@ -329,210 +204,154 @@ describe('Glassix Client', () => {
 
   describe('Idempotency', () => {
     it('should set Idempotency-Key header from idemKey param', async () => {
-      mockPost.mockResolvedValue({
-        data: { id: 'msg-idem' },
-      });
+      mock.onPost(/\/api\/messages$/).reply(200, { id: 'msg-idem' });
 
-      const params: SendParams = {
+      await sendWhatsApp({
         toE164: '+972521234567',
         text: 'Test',
-        idemKey: 'task-unique-123',
-      };
+        idemKey: 'unique-task-id-123',
+      });
 
-      await sendWhatsApp(params);
-
-      expect(mockPost).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.any(Object),
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            'Idempotency-Key': 'task-unique-123',
-          }),
-        })
-      );
+      const request = mock.history.post[0];
+      expect(request.headers?.['Idempotency-Key']).toBe('unique-task-id-123');
     });
   });
 
   describe('API modes', () => {
     it('should use /api/messages endpoint for free text in messages mode', async () => {
-      process.env.GLASSIX_API_MODE = 'messages';
+      mock.onPost(/\/api\/messages$/).reply(200, { id: 'msg-text' });
 
-      mockPost.mockResolvedValue({
-        data: { id: 'msg-free-text' },
+      await sendWhatsApp({
+        toE164: '+972521234567',
+        text: 'Hello world',
+        idemKey: 'task-text',
       });
 
-      const params: SendParams = {
-        toE164: '+972521234567',
-        text: 'Free text message',
-        idemKey: 'task-free',
-      };
-
-      await sendWhatsApp(params);
-
-      expect(mockPost).toHaveBeenCalledWith(
-        '/api/messages',
-        expect.objectContaining({
-          channel: 'whatsapp',
-          to: '+972521234567',
-          type: 'text',
-          text: 'Free text message',
-        }),
-        expect.any(Object)
-      );
+      const request = mock.history.post[0];
+      expect(request.url).toMatch(/\/api\/messages$/);
+      
+      const body = JSON.parse(request.data);
+      expect(body.channel).toBe('whatsapp');
+      expect(body.to).toBe('+972521234567');
+      expect(body.type).toBe('text');
+      expect(body.text).toBe('Hello world');
     });
 
     it('should use /api/messages/template endpoint for template in messages mode', async () => {
-      process.env.GLASSIX_API_MODE = 'messages';
+      mock.onPost(/\/api\/messages\/template$/).reply(200, { id: 'msg-template' });
 
-      mockPost.mockResolvedValue({
-        data: { id: 'msg-template' },
-      });
-
-      const params: SendParams = {
+      await sendWhatsApp({
         toE164: '+972521234567',
         text: 'Template text',
         idemKey: 'task-template',
-        templateId: 'welcome_tmpl',
-        variables: { name: 'Dan', company: 'MAGNUS' },
-      };
+        templateId: 'tmpl-123',
+        variables: { name: 'John', age: 30 },
+      });
 
-      await sendWhatsApp(params);
-
-      expect(mockPost).toHaveBeenCalledWith(
-        '/api/messages/template',
-        expect.objectContaining({
-          channel: 'whatsapp',
-          to: '+972521234567',
-          templateId: 'welcome_tmpl',
-          variables: { name: 'Dan', company: 'MAGNUS' },
-        }),
-        expect.any(Object)
-      );
+      const request = mock.history.post[0];
+      expect(request.url).toMatch(/\/api\/messages\/template$/);
+      
+      const body = JSON.parse(request.data);
+      expect(body.channel).toBe('whatsapp');
+      expect(body.to).toBe('+972521234567');
+      expect(body.templateId).toBe('tmpl-123');
+      expect(body.variables).toEqual({ name: 'John', age: 30 });
     });
 
     it('should use /v1/protocols/send endpoint in protocols mode', async () => {
       process.env.GLASSIX_API_MODE = 'protocols';
+      clearConfigCache();
 
-      mockPost.mockResolvedValue({
-        data: { id: 'proto-msg' },
-      });
+      mock.onPost(/\/v1\/protocols\/send$/).reply(200, { id: 'msg-protocol' });
 
-      const params: SendParams = {
+      await sendWhatsApp({
         toE164: '+972521234567',
         text: 'Protocol message',
-        idemKey: 'task-proto',
-      };
+        idemKey: 'task-protocol',
+      });
 
-      await sendWhatsApp(params);
-
-      expect(mockPost).toHaveBeenCalledWith(
-        '/v1/protocols/send',
-        expect.objectContaining({
-          protocol: 'whatsapp',
-          to: '+972521234567',
-          content: {
-            type: 'text',
-            text: 'Protocol message',
-          },
-        }),
-        expect.any(Object)
-      );
+      const request = mock.history.post[0];
+      expect(request.url).toMatch(/\/v1\/protocols\/send$/);
+      
+      const body = JSON.parse(request.data);
+      expect(body.protocol).toBe('whatsapp');
+      expect(body.to).toBe('+972521234567');
+      expect(body.content).toEqual({ type: 'text', text: 'Protocol message' });
     });
 
     it('should include templateId and variables in protocols mode', async () => {
       process.env.GLASSIX_API_MODE = 'protocols';
+      clearConfigCache();
 
-      mockPost.mockResolvedValue({
-        data: { id: 'proto-template' },
+      mock.onPost(/\/v1\/protocols\/send$/).reply(200, { id: 'msg-protocol-tmpl' });
+
+      await sendWhatsApp({
+        toE164: '+972521234567',
+        text: 'Protocol template',
+        idemKey: 'task-protocol-tmpl',
+        templateId: 'tmpl-456',
+        variables: { foo: 'bar', count: 5 },
       });
 
-      const params: SendParams = {
-        toE164: '+972529876543',
-        text: 'Template via protocols',
-        idemKey: 'task-proto-tmpl',
-        templateId: 'payment_reminder',
-        variables: { amount: 100, due_date: '2025-10-15' },
-      };
-
-      await sendWhatsApp(params);
-
-      expect(mockPost).toHaveBeenCalledWith(
-        '/v1/protocols/send',
-        expect.objectContaining({
-          protocol: 'whatsapp',
-          templateId: 'payment_reminder',
-          variables: { amount: 100, due_date: '2025-10-15' },
-        }),
-        expect.any(Object)
-      );
+      const request = mock.history.post[0];
+      const body = JSON.parse(request.data);
+      
+      expect(body.templateId).toBe('tmpl-456');
+      expect(body.variables).toEqual({ foo: 'bar', count: 5 });
+      expect(body.content).toEqual({ type: 'text', text: 'Protocol template' });
     });
   });
 
   describe('Response parsing', () => {
     it('should parse conversationUrl from data.conversationUrl', async () => {
-      mockPost.mockResolvedValue({
-        data: {
-          id: 'msg-123',
-          conversationUrl: 'https://app.glassix.com/conversations/conv-456',
-        },
+      mock.onPost(/\/api\/messages$/).reply(200, {
+        id: 'msg-1',
+        conversationUrl: 'https://glassix.com/conversations/123',
       });
 
-      const params: SendParams = {
+      const result = await sendWhatsApp({
         toE164: '+972521234567',
         text: 'Test',
-        idemKey: 'task-parse-1',
-      };
+        idemKey: 'task-url',
+      });
 
-      const result = await sendWhatsApp(params);
-
-      expect(result.conversationUrl).toBe('https://app.glassix.com/conversations/conv-456');
-      expect(result.providerId).toBe('msg-123');
+      expect(result.conversationUrl).toBe('https://glassix.com/conversations/123');
+      expect(result.providerId).toBe('msg-1');
     });
 
     it('should parse conversationUrl from data.conversation.url', async () => {
-      mockPost.mockResolvedValue({
-        data: {
-          messageId: 'msg-789',
-          conversation: {
-            id: 'conv-101',
-            url: 'https://app.glassix.com/c/101',
-          },
+      mock.onPost(/\/api\/messages$/).reply(200, {
+        messageId: 'msg-2',
+        conversation: {
+          id: 'conv-456',
+          url: 'https://glassix.com/conv/456',
         },
       });
 
-      const params: SendParams = {
+      const result = await sendWhatsApp({
         toE164: '+972521234567',
         text: 'Test',
-        idemKey: 'task-parse-2',
-      };
+        idemKey: 'task-nested',
+      });
 
-      const result = await sendWhatsApp(params);
-
-      expect(result.conversationUrl).toBe('https://app.glassix.com/c/101');
-      expect(result.providerId).toBe('msg-789');
+      expect(result.conversationUrl).toBe('https://glassix.com/conv/456');
+      expect(result.providerId).toBe('msg-2');
     });
 
     it('should fallback to conversation.id for providerId', async () => {
-      mockPost.mockResolvedValue({
-        data: {
-          conversation: {
-            id: 'conv-fallback',
-            url: 'https://app.glassix.com/c/fb',
-          },
+      mock.onPost(/\/api\/messages$/).reply(200, {
+        conversation: {
+          id: 'fallback-id',
         },
       });
 
-      const params: SendParams = {
+      const result = await sendWhatsApp({
         toE164: '+972521234567',
         text: 'Test',
-        idemKey: 'task-parse-3',
-      };
+        idemKey: 'task-fallback',
+      });
 
-      const result = await sendWhatsApp(params);
-
-      expect(result.providerId).toBe('conv-fallback');
-      expect(result.conversationUrl).toBe('https://app.glassix.com/c/fb');
+      expect(result.providerId).toBe('fallback-id');
     });
   });
 });
-

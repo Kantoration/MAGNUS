@@ -1,11 +1,28 @@
 /**
  * Environment configuration with Zod validation
+ * Supports Glassix Access Token flow with backwards compatibility
+ * Loads .env from binary directory or current working directory
  */
 import { z } from 'zod';
 import dotenv from 'dotenv';
 import path from 'path';
 
-dotenv.config();
+// Determine .env path: prefer binary directory, fallback to cwd
+const getBinaryDir = (): string => {
+  // For PKG binaries, use executable directory
+  // @ts-ignore - pkg adds this property at runtime
+  if (process.pkg) {
+    return path.dirname(process.execPath);
+  }
+  // For source mode, use cwd
+  return process.cwd();
+};
+
+const binaryDir = getBinaryDir();
+const envPath = path.join(binaryDir, '.env');
+
+// Load .env from binary directory
+dotenv.config({ path: envPath });
 
 const configSchema = z.object({
   // Salesforce
@@ -16,9 +33,17 @@ const configSchema = z.object({
 
   // Glassix
   GLASSIX_BASE_URL: z.string().url(),
-  GLASSIX_API_KEY: z.string().min(1),
+  GLASSIX_API_KEY: z.string().min(1).optional(), // legacy direct-bearer OR new key for token exchange
+  GLASSIX_API_SECRET: z.string().min(1).optional(), // new: for /access-token exchange
   GLASSIX_API_MODE: z.enum(['messages', 'protocols']).default('messages'),
-  RETRY_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+  GLASSIX_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
+  
+  // Security
+  SAFE_MODE_STRICT: z.coerce.boolean().default(true),
+  ALLOW_LEGACY_BEARER: z.coerce.boolean().default(false),
+
+  // Retry configuration
+  RETRY_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(3), // Max 5 to prevent excessive backoff (2^5 * 300ms = ~9.6s)
   RETRY_BASE_MS: z.coerce.number().int().min(100).max(5000).default(300),
 
   // Application
@@ -32,18 +57,49 @@ const configSchema = z.object({
   DEFAULT_LANG: z.enum(['he', 'en']).default('he'),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
   KEEP_READY_ON_FAIL: z.coerce.boolean().default(true),
+  PERMIT_LANDLINES: z.coerce.boolean().default(false), // Allow non-mobile numbers
+  PAGED: z.coerce.boolean().default(false), // Enable paging mode for large batches
+
+  // Metrics
+  METRICS_ENABLED: z.coerce.boolean().default(false), // Enable Prometheus metrics server
+  METRICS_PORT: z.coerce.number().int().min(1024).max(65535).default(9090), // Metrics server port
 });
 
 export type Config = z.infer<typeof configSchema>;
 
 let cachedConfig: Config | null = null;
+let legacyWarningEmitted = false;
 
+/**
+ * Derived flag: use access token flow if API_SECRET is present
+ */
+export let USE_ACCESS_TOKEN_FLOW = false;
+
+/**
+ * Get validated configuration with legacy migration support
+ */
 export function getConfig(): Config {
   if (cachedConfig) {
     return cachedConfig;
   }
 
-  const result = configSchema.safeParse(process.env);
+  // Legacy migration: map GLASSIXAPIKEY to GLASSIX_API_KEY if present
+  const env = { ...process.env };
+  
+  const hasLegacyKey = env.GLASSIXAPIKEY && !env.GLASSIX_API_KEY && !env.GLASSIX_API_SECRET;
+  if (hasLegacyKey) {
+    env.GLASSIX_API_KEY = env.GLASSIXAPIKEY;
+    
+    // Emit warning exactly once
+    if (!legacyWarningEmitted) {
+      console.warn(
+        '[WARN] Using legacy GLASSIXAPIKEY; migrate to GLASSIX_API_KEY/GLASSIX_API_SECRET + access-token flow'
+      );
+      legacyWarningEmitted = true;
+    }
+  }
+
+  const result = configSchema.safeParse(env);
 
   if (!result.success) {
     console.error('Configuration validation failed:');
@@ -52,6 +108,28 @@ export function getConfig(): Config {
   }
 
   cachedConfig = result.data;
+
+  // Validate Glassix auth configuration
+  const hasApiKey = !!cachedConfig.GLASSIX_API_KEY;
+  const hasApiSecret = !!cachedConfig.GLASSIX_API_SECRET;
+
+  if (!hasApiKey && !hasApiSecret) {
+    throw new Error(
+      'GLASSIX_API_KEY is required. For access token flow, also provide GLASSIX_API_SECRET.'
+    );
+  }
+
+  // Access token flow requires BOTH key and secret
+  if (hasApiSecret && !hasApiKey) {
+    throw new Error(
+      'GLASSIX_API_KEY is required when using GLASSIX_API_SECRET for access token flow. ' +
+      'Both credentials are needed to exchange for an access token.'
+    );
+  }
+
+  // Set derived flag (only when BOTH are present)
+  USE_ACCESS_TOKEN_FLOW = hasApiKey && hasApiSecret;
+
   return cachedConfig;
 }
 
@@ -60,4 +138,81 @@ export function getConfig(): Config {
  */
 export function clearConfigCache(): void {
   cachedConfig = null;
+  legacyWarningEmitted = false;
+  USE_ACCESS_TOKEN_FLOW = false;
+}
+
+/**
+ * Assert secure authentication is configured
+ * Throws if SAFE_MODE_STRICT is enabled and legacy mode is used without explicit opt-in
+ */
+export function assertSecureAuth(): void {
+  const config = getConfig();
+
+  if (config.SAFE_MODE_STRICT && !USE_ACCESS_TOKEN_FLOW && !config.ALLOW_LEGACY_BEARER) {
+    throw new Error(
+      'Secure authentication required: GLASSIX_API_SECRET is missing.\n\n' +
+      'AutoMessager requires modern access token flow in secure mode.\n\n' +
+      'Options:\n' +
+      '  1. Add GLASSIX_API_SECRET to .env (recommended)\n' +
+      '     Run: automessager init\n\n' +
+      '  2. Allow legacy bearer mode (not recommended)\n' +
+      '     Add to .env: ALLOW_LEGACY_BEARER=true\n\n' +
+      '  3. Disable strict mode (not recommended for production)\n' +
+      '     Add to .env: SAFE_MODE_STRICT=false'
+    );
+  }
+}
+
+/**
+ * Get redacted environment snapshot for diagnostics
+ * All secrets are masked, showing only last 4 characters
+ */
+export function getRedactedEnvSnapshot(): Record<string, string> {
+  const config = getConfig();
+
+  const maskSecret = (value?: string): string => {
+    if (!value) return '<not-set>';
+    if (value.length <= 4) return '****';
+    return '****' + value.slice(-4);
+  };
+
+  return {
+    // Salesforce (username visible, secrets masked)
+    SF_LOGIN_URL: config.SF_LOGIN_URL,
+    SF_USERNAME: config.SF_USERNAME,
+    SF_PASSWORD: maskSecret(config.SF_PASSWORD),
+    SF_TOKEN: maskSecret(config.SF_TOKEN),
+
+    // Glassix (URL visible, secrets masked)
+    GLASSIX_BASE_URL: config.GLASSIX_BASE_URL,
+    GLASSIX_API_KEY: maskSecret(config.GLASSIX_API_KEY),
+    GLASSIX_API_SECRET: maskSecret(config.GLASSIX_API_SECRET),
+    GLASSIX_API_MODE: config.GLASSIX_API_MODE,
+    GLASSIX_TIMEOUT_MS: String(config.GLASSIX_TIMEOUT_MS),
+
+    // Security
+    SAFE_MODE_STRICT: String(config.SAFE_MODE_STRICT),
+    ALLOW_LEGACY_BEARER: String(config.ALLOW_LEGACY_BEARER),
+    USE_ACCESS_TOKEN_FLOW: String(USE_ACCESS_TOKEN_FLOW),
+
+    // Application
+    TASKS_QUERY_LIMIT: String(config.TASKS_QUERY_LIMIT),
+    TASK_CUSTOM_PHONE_FIELD: config.TASK_CUSTOM_PHONE_FIELD,
+    XSLX_MAPPING_PATH: config.XSLX_MAPPING_PATH,
+    XSLX_SHEET: config.XSLX_SHEET || '<default>',
+    DEFAULT_LANG: config.DEFAULT_LANG,
+    LOG_LEVEL: config.LOG_LEVEL,
+    KEEP_READY_ON_FAIL: String(config.KEEP_READY_ON_FAIL),
+    PERMIT_LANDLINES: String(config.PERMIT_LANDLINES),
+    PAGED: String(config.PAGED),
+
+    // Retry
+    RETRY_ATTEMPTS: String(config.RETRY_ATTEMPTS),
+    RETRY_BASE_MS: String(config.RETRY_BASE_MS),
+
+    // Metrics
+    METRICS_ENABLED: String(config.METRICS_ENABLED),
+    METRICS_PORT: String(config.METRICS_PORT),
+  };
 }

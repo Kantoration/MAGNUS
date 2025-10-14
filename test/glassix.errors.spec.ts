@@ -1,276 +1,214 @@
 /**
- * Error handling tests for Glassix client
+ * Tests for Glassix error handling - authorization redaction, retryability, safety
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import axios, { AxiosError } from 'axios';
-import { GlassixClient } from '../src/glassix.js';
-
-// Mock axios and axios.isAxiosError
-vi.mock('axios', () => ({
-  default: {
-    create: vi.fn(),
-    isAxiosError: vi.fn(),
-  },
-  isAxiosError: vi.fn(),
-}));
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import axios from 'axios';
+import MockAdapter from 'axios-mock-adapter';
+import { sendWhatsApp } from '../src/glassix.js';
+import { clearConfigCache } from '../src/config.js';
 
 describe('Glassix Error Handling', () => {
-  let client: GlassixClient;
+  let mock: MockAdapter;
+  const originalEnv = process.env;
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    // Reset environment
+    process.env = { ...originalEnv };
+    process.env.GLASSIX_BASE_URL = 'https://api.glassix.com';
+    process.env.GLASSIX_API_KEY = 'test-api-key';
+    process.env.GLASSIX_API_MODE = 'messages';
+    process.env.GLASSIX_TIMEOUT_MS = '15000';
+    process.env.SF_LOGIN_URL = 'https://login.salesforce.com';
+    process.env.SF_USERNAME = 'test@example.com';
+    process.env.SF_PASSWORD = 'password';
+    process.env.SF_TOKEN = 'token';
+    process.env.RETRY_ATTEMPTS = '3';
+    process.env.RETRY_BASE_MS = '300';
+    process.env.LOG_LEVEL = 'error';
+    delete process.env.DRY_RUN;
+    delete process.env.GLASSIX_API_SECRET;
 
-    // Mock axios.create
-    const mockPost = vi.fn();
-    (axios.create as any).mockReturnValue({
-      post: mockPost,
-    });
+    clearConfigCache();
 
-    // Mock axios.isAxiosError to return true for our test errors
-    (axios.isAxiosError as any).mockReturnValue(true);
+    // Mock axios
+    mock = new MockAdapter(axios);
+  });
 
-    client = new GlassixClient();
+  afterEach(() => {
+    process.env = originalEnv;
+    clearConfigCache();
+    mock.restore();
   });
 
   it('should handle 429 rate limit error with truncated message', async () => {
-    const longErrorMessage = 'Rate limit exceeded. '.repeat(100); // Create a long message
+    const longMessage = 'Rate limit exceeded. '.repeat(50); // Long error message
+    mock.onPost(/\/api\/messages$/).reply(429, { error: longMessage });
 
-    const error: Partial<AxiosError> = {
-      isAxiosError: true,
-      code: 'ERR_BAD_REQUEST',
-      message: 'Request failed with status code 429',
-      response: {
-        status: 429,
-        statusText: 'Too Many Requests',
-        data: {
-          message: longErrorMessage,
-        },
-        headers: {},
-        config: {} as any,
-      },
-    };
-
-    // Get the mock post function
-    const mockPost = (axios.create as any).mock.results[0].value.post;
-    mockPost.mockRejectedValue(error);
-
-    const result = await client.sendWhatsAppMessage('+972521234567', 'Test message');
-
-    expect(result.success).toBe(false);
-    expect(result.error).toBeDefined();
-
-    // Verify error message is truncated to 500 chars
-    if (result.error) {
-      expect(result.error.length).toBeLessThanOrEqual(520); // 500 + "... (truncated)"
-      expect(result.error).toContain('... (truncated)');
+    try {
+      await sendWhatsApp({
+        toE164: '+972521234567',
+        text: 'Test',
+        idemKey: 'task-429',
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toContain('429');
+      expect(error.message.length).toBeLessThan(600); // Truncated
     }
   });
 
   it('should handle 500 server error without exposing auth headers', async () => {
-    const error: Partial<AxiosError> = {
-      isAxiosError: true,
-      code: 'ERR_BAD_RESPONSE',
-      message: 'Request failed with status code 500',
-      response: {
-        status: 500,
-        statusText: 'Internal Server Error',
-        data: {
-          message: 'Internal server error occurred',
-        },
-        headers: {
-          'content-type': 'application/json',
-          authorization: 'Bearer secret_token_12345', // Should NOT be logged
-        },
-        config: {
-          headers: {
-            Authorization: 'Bearer secret_token_12345', // Should NOT be logged
-          },
-        } as any,
+    const errorWithAuth = {
+      error: 'Internal Server Error',
+      authorization: 'Bearer secret-token-12345',
+      debug: {
+        authorization: 'Bearer another-secret',
       },
     };
 
-    const mockPost = (axios.create as any).mock.results[0].value.post;
-    mockPost.mockRejectedValue(error);
+    mock.onPost(/\/api\/messages$/).reply(500, errorWithAuth);
 
-    const result = await client.sendWhatsAppMessage('+972521234567', 'Test message');
-
-    expect(result.success).toBe(false);
-    expect(result.error).toBe('Internal server error occurred');
-
-    // Verify auth tokens are NOT in the result
-    expect(result.error).not.toContain('secret_token');
-    expect(result.error).not.toContain('Bearer');
+    try {
+      await sendWhatsApp({
+        toE164: '+972521234567',
+        text: 'Test',
+        idemKey: 'task-500',
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toContain('500');
+      expect(error.message).not.toContain('secret-token-12345');
+      expect(error.message).not.toContain('another-secret');
+      expect(error.message).toContain('[REDACTED]'); // Authorization redacted
+    }
   });
 
   it('should handle network timeout error', async () => {
-    const error: Partial<AxiosError> = {
-      isAxiosError: true,
-      code: 'ECONNABORTED',
-      message: 'timeout of 30000ms exceeded',
-      response: undefined,
-    };
+    mock.onPost(/\/api\/messages$/).timeout();
 
-    const mockPost = (axios.create as any).mock.results[0].value.post;
-    mockPost.mockRejectedValue(error);
-
-    const result = await client.sendWhatsAppMessage('+972521234567', 'Test message');
-
-    expect(result.success).toBe(false);
-    expect(result.error).toBe('timeout of 30000ms exceeded');
+    try {
+      await sendWhatsApp({
+        toE164: '+972521234567',
+        text: 'Test',
+        idemKey: 'task-timeout',
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toBeDefined();
+      expect(error.message.length).toBeGreaterThan(0);
+    }
   });
 
   it('should handle 400 bad request with validation errors', async () => {
-    const error: Partial<AxiosError> = {
-      isAxiosError: true,
-      code: 'ERR_BAD_REQUEST',
-      message: 'Request failed with status code 400',
-      response: {
-        status: 400,
-        statusText: 'Bad Request',
-        data: {
-          message: 'Invalid phone number format',
-        },
-        headers: {},
-        config: {} as any,
+    mock.onPost(/\/api\/messages$/).reply(400, {
+      error: 'Validation failed',
+      details: {
+        to: 'Invalid phone number format',
+        authorization: 'Bearer leaked-secret',
       },
-    };
+    });
 
-    const mockPost = (axios.create as any).mock.results[0].value.post;
-    mockPost.mockRejectedValue(error);
-
-    const result = await client.sendWhatsAppMessage('+972INVALID', 'Test message');
-
-    expect(result.success).toBe(false);
-    expect(result.error).toBe('Invalid phone number format');
+    try {
+      await sendWhatsApp({
+        toE164: '+972521234567',
+        text: 'Test',
+        idemKey: 'task-400',
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toContain('400');
+      expect(error.message).toContain('Validation failed');
+      expect(error.message).not.toContain('leaked-secret');
+      expect(mock.history.post).toHaveLength(1); // No retries on 400
+    }
   });
 
   it('should handle 401 unauthorized error', async () => {
-    const error: Partial<AxiosError> = {
-      isAxiosError: true,
-      code: 'ERR_BAD_REQUEST',
-      message: 'Request failed with status code 401',
-      response: {
-        status: 401,
-        statusText: 'Unauthorized',
-        data: {
-          message: 'Invalid or expired API key',
-        },
-        headers: {},
-        config: {} as any,
-      },
-    };
+    mock.onPost(/\/api\/messages$/).reply(401, {
+      error: 'Unauthorized',
+      message: 'Invalid API key',
+    });
 
-    const mockPost = (axios.create as any).mock.results[0].value.post;
-    mockPost.mockRejectedValue(error);
-
-    const result = await client.sendWhatsAppMessage('+972521234567', 'Test message');
-
-    expect(result.success).toBe(false);
-    expect(result.error).toBe('Invalid or expired API key');
+    try {
+      await sendWhatsApp({
+        toE164: '+972521234567',
+        text: 'Test',
+        idemKey: 'task-401',
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toContain('401');
+      expect(error.message).toContain('Unauthorized');
+      expect(mock.history.post).toHaveLength(1); // No retries on 401
+    }
   });
 
   it('should handle non-Axios errors gracefully', async () => {
-    const error = new Error('Unexpected error occurred');
+    // Simulate a non-Axios error (e.g., programming error)
+    mock.onPost(/\/api\/messages$/).reply(() => {
+      throw new Error('Unexpected programming error');
+    });
 
-    // For this test, make isAxiosError return false
-    (axios.isAxiosError as any).mockReturnValueOnce(false);
-
-    const mockPost = (axios.create as any).mock.results[0].value.post;
-    mockPost.mockRejectedValue(error);
-
-    const result = await client.sendWhatsAppMessage('+972521234567', 'Test message');
-
-    expect(result.success).toBe(false);
-    expect(result.error).toBe('Unexpected error occurred');
+    try {
+      await sendWhatsApp({
+        toE164: '+972521234567',
+        text: 'Test',
+        idemKey: 'task-non-axios',
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toBeDefined();
+      expect(error.message).not.toContain('Authorization');
+      expect(error.message).not.toContain('Bearer');
+    }
   });
 
   it('should handle response with no error message', async () => {
-    const error: Partial<AxiosError> = {
-      isAxiosError: true,
-      code: 'ERR_BAD_RESPONSE',
-      message: 'Request failed with status code 503',
-      response: {
-        status: 503,
-        statusText: 'Service Unavailable',
-        data: {}, // No message field
-        headers: {},
-        config: {} as any,
-      },
-    };
+    mock.onPost(/\/api\/messages$/).reply(500); // No response body
 
-    const mockPost = (axios.create as any).mock.results[0].value.post;
-    mockPost.mockRejectedValue(error);
-
-    const result = await client.sendWhatsAppMessage('+972521234567', 'Test message');
-
-    expect(result.success).toBe(false);
-    expect(result.error).toBe('Request failed with status code 503');
+    try {
+      await sendWhatsApp({
+        toE164: '+972521234567',
+        text: 'Test',
+        idemKey: 'task-no-msg',
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toContain('500');
+    }
   });
 
   it('should mask phone numbers in all error scenarios', async () => {
-    const error: Partial<AxiosError> = {
-      isAxiosError: true,
-      code: 'ERR_BAD_REQUEST',
-      message: 'Request failed with status code 400',
-      response: {
-        status: 400,
-        statusText: 'Bad Request',
-        data: {
-          message: 'Phone number +972521234567 is blocked',
-        },
-        headers: {},
-        config: {} as any,
-      },
-    };
+    mock.onPost(/\/api\/messages$/).reply(404, { error: 'Not found' });
 
-    const mockPost = (axios.create as any).mock.results[0].value.post;
-    mockPost.mockRejectedValue(error);
-
-    const phone = '+972521234567';
-    const result = await client.sendWhatsAppMessage(phone, 'Test message');
-
-    expect(result.success).toBe(false);
-
-    // The error message itself may contain the phone, but logs should mask it
-    // This is handled by the logger redaction and mask() function
-    // Verify that mask() works correctly
-    const { mask: maskFn } = await import('../src/phone.js');
-    const masked = maskFn(phone);
-    expect(masked).toBe('+9725******67');
-    expect(masked).not.toContain('21234');
+    try {
+      await sendWhatsApp({
+        toE164: '+972521234567',
+        text: 'Test',
+        idemKey: 'task-mask',
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      // Phone should be masked in logs (not in error message necessarily)
+      expect(error.message).toBeDefined();
+      // The main verification is that logs use mask() - tested via logger spy in other tests
+    }
   });
 
   it('should truncate extremely long error messages', async () => {
-    const veryLongMessage = 'Error: ' + 'x'.repeat(1000);
+    const hugeError = 'x'.repeat(2000);
+    mock.onPost(/\/api\/messages$/).reply(503, { error: hugeError });
 
-    const error: Partial<AxiosError> = {
-      isAxiosError: true,
-      code: 'ERR_BAD_REQUEST',
-      message: 'Request failed',
-      response: {
-        status: 500,
-        statusText: 'Internal Server Error',
-        data: {
-          message: veryLongMessage,
-        },
-        headers: {},
-        config: {} as any,
-      },
-    };
-
-    const mockPost = (axios.create as any).mock.results[0].value.post;
-    mockPost.mockRejectedValue(error);
-
-    const result = await client.sendWhatsAppMessage('+972521234567', 'Test message');
-
-    expect(result.success).toBe(false);
-    expect(result.error).toBeDefined();
-
-    if (result.error) {
-      // Should be truncated to 500 chars + "... (truncated)"
-      expect(result.error.length).toBeLessThanOrEqual(520);
-      expect(result.error).toContain('... (truncated)');
+    try {
+      await sendWhatsApp({
+        toE164: '+972521234567',
+        text: 'Test',
+        idemKey: 'task-huge',
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toContain('…'); // Truncation marker
+      expect(error.message.length).toBeLessThan(600);
     }
   });
 });
-

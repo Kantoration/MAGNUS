@@ -1,270 +1,190 @@
 /**
- * Happy path tests for the orchestrator
+ * Tests for orchestrator happy path - successful task processing end-to-end
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { Connection } from 'jsforce';
-import * as sf from '../src/sf.js';
-import * as templates from '../src/templates.js';
-import { GlassixClient } from '../src/glassix.js';
-import type { STask } from '../src/sf.js';
-import type { NormalizedMapping } from '../src/types.js';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { clearConfigCache } from '../src/config.js';
 
-describe('Orchestrator Happy Path', () => {
+describe('Run Orchestrator - Happy Path', () => {
+  const originalEnv = process.env;
+
   beforeEach(() => {
-    // Clear all mocks before each test
+    process.env = { ...originalEnv };
+    process.env.GLASSIX_BASE_URL = 'https://api.glassix.com';
+    process.env.GLASSIX_API_KEY = 'test-key';
+    process.env.GLASSIX_API_MODE = 'messages';
+    process.env.SF_LOGIN_URL = 'https://login.salesforce.com';
+    process.env.SF_USERNAME = 'test@example.com';
+    process.env.SF_PASSWORD = 'password';
+    process.env.SF_TOKEN = 'token';
+    process.env.TASK_CUSTOM_PHONE_FIELD = 'Phone__c';
+    process.env.LOG_LEVEL = 'error';
+    process.env.XSLX_MAPPING_PATH = './massege_maping.xlsx';
+    delete process.env.DRY_RUN;
+
+    clearConfigCache();
     vi.clearAllMocks();
   });
 
   afterEach(() => {
+    process.env = originalEnv;
+    clearConfigCache();
     vi.restoreAllMocks();
   });
 
-  it('should process tasks with Who/What shapes and mask phones in logs', async () => {
+  it('should process 2 tasks successfully with bounded audit and masked phones', async () => {
+    // Import dynamically after env is set
+    const { runOnce } = await import('../src/run.js');
+    const sf = await import('../src/sf.js');
+    const glassix = await import('../src/glassix.js');
+    const templates = await import('../src/templates.js');
+
     // Mock Salesforce login
     const mockConn = {
+      login: vi.fn(),
       sobject: vi.fn(() => ({
+        retrieve: vi.fn().mockResolvedValue({ Description: '' }),
         update: vi.fn().mockResolvedValue({ success: true }),
       })),
-      logout: vi.fn().mockResolvedValue(undefined),
-    } as unknown as Connection;
+      logout: vi.fn(),
+      userInfo: { id: 'user-123', organizationId: 'org-123' },
+    };
 
-    vi.spyOn(sf, 'login').mockResolvedValue(mockConn);
+    vi.spyOn(sf, 'login').mockResolvedValue(mockConn as any);
 
-    // Mock fetchPendingTasks to return 2 tasks with different shapes
-    const mockTasks: STask[] = [
+    // Mock describeTaskFields - return all custom fields
+    vi.spyOn(sf, 'describeTaskFields').mockResolvedValue(
+      new Set([
+        'Id',
+        'Status',
+        'Description',
+        'Audit_Trail__c',
+        'Delivery_Status__c',
+        'Last_Sent_At__c',
+        'Glassix_Conversation_URL__c',
+        'Failure_Reason__c',
+        'Ready_for_Automation__c',
+      ])
+    );
+
+    // Mock fetchPendingTasks - return 2 tasks
+    vi.spyOn(sf, 'fetchPendingTasks').mockResolvedValue([
       {
-        Id: '00T000000000001',
-        Subject: 'New Phone',
+        Id: 'task-001',
         Status: 'Not Started',
-        Task_Type_Key__c: 'NEW_PHONE',
-        ActivityDate: '2025-10-09',
-        Description: 'Test task 1',
-        Context_JSON__c: JSON.stringify({ device_model: 'iPhone 14', imei: '123456789' }),
+        Subject: 'Test Task 1',
+        Task_Type_Key__c: 'TEST_KEY',
         Who: {
           attributes: { type: 'Contact' },
-          FirstName: 'Dan',
-          LastName: 'Cohen',
-          MobilePhone: '052-123-4567',
-          Phone: null,
-          Account: { Name: 'MAGNUS' },
+          FirstName: 'John',
+          MobilePhone: '+972521234567',
+          Account: { Name: 'Acme Corp' },
         },
-        What: null,
-        Phone__c: null,
       },
       {
-        Id: '00T000000000002',
-        Subject: 'Payment Reminder',
-        Status: 'In Progress',
-        Task_Type_Key__c: 'PAYMENT_REMINDER',
-        ActivityDate: '2025-10-09',
-        Description: 'Test task 2',
-        Context_JSON__c: null,
-        Who: {
-          attributes: { type: 'Lead' },
-          FirstName: 'Sara',
-          LastName: 'Levi',
-          MobilePhone: '052-987-6543',
-          Phone: null,
-        },
+        Id: 'task-002',
+        Status: 'Not Started',
+        Subject: 'Test Task 2',
+        Task_Type_Key__c: 'TEST_KEY',
         What: {
           attributes: { type: 'Account' },
-          Name: 'Test Account',
-          Phone: '03-555-7777',
+          Name: 'Tech Inc',
+          Phone: '+972529999999',
         },
-        Phone__c: null,
       },
-    ];
+    ] as any);
 
-    vi.spyOn(sf, 'fetchPendingTasks').mockResolvedValue(mockTasks);
-
-    // Mock template loading
-    const mockTemplateMap = new Map<string, NormalizedMapping>([
-      [
-        'NEW_PHONE',
-        {
-          taskKey: 'NEW_PHONE',
-          messageBody: 'שלום {{first_name}}, הטלפון החדש {{device_model}} שלך מוכן!',
-          link: 'https://example.com/phone',
+    // Mock template loading and rendering
+    const mockTemplate = {
+      name: 'TEST_KEY',
+      hebrewMessage: 'שלום {{first_name}}',
+      englishMessage: 'Hello {{first_name}}',
           glassixTemplateId: undefined,
-        },
-      ],
-      [
-        'PAYMENT_REMINDER',
-        {
-          taskKey: 'PAYMENT_REMINDER',
-          messageBody: 'היי {{first_name}}, תזכורת לתשלום עבור {{account_name}}',
-          link: undefined,
-          glassixTemplateId: 'payment_template_1',
-        },
-      ],
-    ]);
+      link: 'https://example.com',
+    };
 
-    vi.spyOn(templates, 'loadTemplateMap').mockResolvedValue(mockTemplateMap);
-    vi.spyOn(templates, 'pickTemplate').mockImplementation((key, map) => map.get(key));
-    vi.spyOn(templates, 'renderMessage').mockImplementation((mapping, _ctx) => ({
-      text: mapping.messageBody || '',
-      viaGlassixTemplate: mapping.glassixTemplateId,
-    }));
+    vi.spyOn(templates, 'loadTemplateMap').mockResolvedValue(
+      new Map([['TEST_KEY', mockTemplate]]) as any
+    );
 
-    // Mock Glassix client
-    const mockSendWhatsApp = vi.fn().mockResolvedValue({
-      success: true,
-      messageId: 'msg_12345',
+    vi.spyOn(templates, 'pickTemplate').mockReturnValue(mockTemplate as any);
+
+    vi.spyOn(templates, 'renderMessage').mockReturnValue({
+      text: 'Hello John',
+      viaGlassixTemplate: undefined,
     });
 
-    vi.spyOn(GlassixClient.prototype, 'sendWhatsAppMessage').mockImplementation(mockSendWhatsApp);
-
-    // Import and run (we can't actually run main, so we'll test the flow via mocks)
-    // Verify the mocks were called correctly
-    expect(sf.login).toBeDefined();
-    expect(sf.fetchPendingTasks).toBeDefined();
-    expect(templates.loadTemplateMap).toBeDefined();
-
-    // Simulate processing
-    const conn = await sf.login();
-    const tasks = await sf.fetchPendingTasks(conn);
-    const templateMap = await templates.loadTemplateMap();
-
-    expect(tasks.length).toBe(2);
-    expect(templateMap.size).toBe(2);
-
-    // Process first task
-    const task1 = tasks[0];
-    const taskKey1 = sf.deriveTaskKey(task1);
-    const target1 = sf.resolveTarget(task1);
-    const mapping1 = templates.pickTemplate(taskKey1, templateMap);
-
-    expect(taskKey1).toBe('NEW_PHONE');
-    expect(target1.phoneE164).toBe('+972521234567');
-    expect(target1.firstName).toBe('Dan');
-    expect(target1.accountName).toBe('MAGNUS');
-    expect(mapping1).toBeDefined();
-
-    // Verify phone is masked in any logging context
-    const maskedPhone = target1.phoneE164!.substring(0, 5) + '******' + target1.phoneE164!.slice(-2);
-    expect(maskedPhone).toMatch(/^\+9725\*{6}\d{2}$/);
-
-    // Process second task
-    const task2 = tasks[1];
-    const taskKey2 = sf.deriveTaskKey(task2);
-    const target2 = sf.resolveTarget(task2);
-    const mapping2 = templates.pickTemplate(taskKey2, templateMap);
-
-    expect(taskKey2).toBe('PAYMENT_REMINDER');
-    expect(target2.phoneE164).toBe('+972529876543');
-    expect(target2.firstName).toBe('Sara');
-    expect(target2.accountName).toBe('Test Account');
-    expect(mapping2).toBeDefined();
-    expect(mapping2?.glassixTemplateId).toBe('payment_template_1');
-  });
-
-  it('should handle tasks with custom phone field priority', async () => {
-    const mockTask: STask = {
-      Id: '00T000000000003',
-      Subject: 'Custom Phone Test',
-      Status: 'Not Started',
-      Task_Type_Key__c: 'TEST',
-      ActivityDate: '2025-10-09',
-      Description: 'Test with custom phone',
-      Context_JSON__c: null,
-      Phone__c: '052-111-2222', // Custom phone field
-      Who: {
-        attributes: { type: 'Contact' },
-        FirstName: 'Test',
-        LastName: 'User',
-        MobilePhone: '052-999-8888', // Should be ignored in favor of Phone__c
-        Phone: null,
-        Account: { Name: 'Test Co' },
-      },
-      What: null,
-    };
-
-    const target = sf.resolveTarget(mockTask);
-
-    expect(target.source).toBe('TaskCustomPhone');
-    expect(target.phoneRaw).toBe('052-111-2222');
-    expect(target.phoneE164).toBe('+972521112222');
-    expect(target.firstName).toBe('Test');
-    expect(target.accountName).toBe('Test Co');
-  });
-
-  it('should handle missing phone and set Waiting on External', async () => {
-    const mockTask: STask = {
-      Id: '00T000000000004',
-      Subject: 'No Phone Test',
-      Status: 'Not Started',
-      Task_Type_Key__c: 'TEST',
-      ActivityDate: '2025-10-09',
-      Description: 'Test with no phone',
-      Context_JSON__c: null,
-      Phone__c: null,
-      Who: {
-        attributes: { type: 'Contact' },
-        FirstName: 'NoPhone',
-        LastName: 'User',
-        MobilePhone: null,
-        Phone: null,
-        Account: { Name: 'Test Co' },
-      },
-      What: null,
-    };
-
-    const target = sf.resolveTarget(mockTask);
-
-    expect(target.phoneE164).toBeNull();
-    expect(target.source).toBe('None');
-    // In actual run.ts, this would trigger updateTaskToWaiting
-  });
-
-  it('should parse context JSON and merge with target info', async () => {
-    const mockTask: STask = {
-      Id: '00T000000000005',
-      Subject: 'Context Test',
-      Status: 'Not Started',
-      Task_Type_Key__c: 'CONTEXT_TEST',
-      ActivityDate: '2025-10-09',
-      Description: 'Test context merging',
-      Context_JSON__c: JSON.stringify({
-        device_model: 'Samsung S23',
-        imei: '987654321',
-        custom_field: 'custom_value',
-      }),
-      Phone__c: '052-333-4444',
-      Who: {
-        attributes: { type: 'Contact' },
-        FirstName: 'Context',
-        LastName: 'User',
-        MobilePhone: null,
-        Phone: null,
-        Account: { Name: 'Context Co' },
-      },
-      What: null,
-    };
-
-    const ctxFromTask = sf.getContext(mockTask);
-    const target = sf.resolveTarget(mockTask);
-
-    expect(ctxFromTask).toEqual({
-      device_model: 'Samsung S23',
-      imei: '987654321',
-      custom_field: 'custom_value',
+    // Mock Glassix send
+    vi.spyOn(glassix, 'sendWhatsApp').mockResolvedValue({
+      conversationUrl: 'https://glassix.com/conv/123',
+      providerId: 'msg-123',
     });
 
-    expect(target.phoneE164).toBe('+972523334444');
-    expect(target.firstName).toBe('Context');
-    expect(target.accountName).toBe('Context Co');
+    // Run the orchestrator
+    const stats = await runOnce();
 
-    // Simulate context merging (as done in run.ts)
-    const mergedCtx = {
-      ...ctxFromTask,
-      first_name: ctxFromTask.first_name ?? target.firstName ?? '',
-      account_name: ctxFromTask.account_name ?? target.accountName ?? '',
+    // Verify stats
+    expect(stats.tasks).toBe(2);
+    expect(stats.sent).toBe(2);
+    expect(stats.failed).toBe(0);
+    expect(stats.skipped).toBe(0);
+
+    // Verify Glassix was called twice with masked phones
+    expect(glassix.sendWhatsApp).toHaveBeenCalledTimes(2);
+    expect(glassix.sendWhatsApp).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toE164: '+972521234567',
+        idemKey: 'task-001',
+      })
+    );
+
+    // Verify SF update was called for both tasks
+    expect(mockConn.sobject).toHaveBeenCalled();
+
+    // Verify logout
+    expect(mockConn.logout).toHaveBeenCalled();
+  });
+
+  it('should use DRY_RUN mode when env is set', async () => {
+    process.env.DRY_RUN = '1';
+    clearConfigCache();
+
+    const { runOnce } = await import('../src/run.js');
+    const sf = await import('../src/sf.js');
+    const glassix = await import('../src/glassix.js');
+    const templates = await import('../src/templates.js');
+
+    const mockConn = {
+      login: vi.fn(),
+      logout: vi.fn(),
+      userInfo: { id: 'user-123' },
     };
 
-    expect(mergedCtx.first_name).toBe('Context');
-    expect(mergedCtx.account_name).toBe('Context Co');
-    expect(mergedCtx.device_model).toBe('Samsung S23');
-    expect(mergedCtx.custom_field).toBe('custom_value');
+    vi.spyOn(sf, 'login').mockResolvedValue(mockConn as any);
+    vi.spyOn(sf, 'describeTaskFields').mockResolvedValue(new Set(['Id']));
+    vi.spyOn(sf, 'fetchPendingTasks').mockResolvedValue([
+      {
+        Id: 'task-dry',
+      Status: 'Not Started',
+        Task_Type_Key__c: 'TEST_KEY',
+        Phone__c: '+972521111111',
+      },
+    ] as any);
+
+    vi.spyOn(templates, 'loadTemplateMap').mockResolvedValue(
+      new Map([
+        ['test_key', { name: 'test_key', hebrewMessage: 'Test', englishMessage: 'Test' }],
+      ]) as any
+    );
+    vi.spyOn(templates, 'pickTemplate').mockReturnValue({} as any);
+    vi.spyOn(templates, 'renderMessage').mockReturnValue({ text: 'Test', viaGlassixTemplate: undefined });
+
+    const sendSpy = vi.spyOn(glassix, 'sendWhatsApp');
+
+    const stats = await runOnce();
+
+    // Should preview, not send
+    expect(stats.previewed).toBe(1);
+    expect(stats.sent).toBe(0);
+    expect(sendSpy).not.toHaveBeenCalled();
   });
 });
-

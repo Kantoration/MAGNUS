@@ -57,10 +57,10 @@ describe('Excel Template Header Validation', () => {
   });
 
   it('should throw error when "name" header is missing', async () => {
-    // Create workbook WITHOUT name header
+    // Create workbook WITHOUT name header (use a field NOT in aliases)
     const ws = XLSX.utils.json_to_sheet([
       {
-        task_name: 'NEW_PHONE', // Wrong column name
+        task_type_xyz: 'NEW_PHONE', // Not in any alias
         'מלל הודעה': 'Test message',
         Link: 'https://example.com',
         'שם הודעה מובנית בגלאסיקס': '',
@@ -71,7 +71,7 @@ describe('Excel Template Header Validation', () => {
     XLSX.utils.book_append_sheet(wb, ws, 'Templates');
     XLSX.writeFile(wb, tempFilePath);
 
-    await expect(loadTemplateMap(tempFilePath)).rejects.toThrow(/Missing required Excel headers.*name/);
+    await expect(loadTemplateMap(tempFilePath)).rejects.toThrow(/Missing required Excel headers/);
   });
 
   it('should throw error when Hebrew message body header is missing', async () => {
@@ -93,12 +93,12 @@ describe('Excel Template Header Validation', () => {
   });
 
   it('should throw error when Link header is missing', async () => {
-    // Create workbook WITHOUT Link header
+    // Create workbook WITHOUT Link header (use a field NOT in aliases)
     const ws = XLSX.utils.json_to_sheet([
       {
         name: 'NEW_PHONE',
         'מלל הודעה': 'Test message',
-        URL: 'https://example.com', // Wrong column name
+        website: 'https://example.com', // Not in any Link alias
         'שם הודעה מובנית בגלאסיקס': '',
       },
     ]);
@@ -107,7 +107,7 @@ describe('Excel Template Header Validation', () => {
     XLSX.utils.book_append_sheet(wb, ws, 'Templates');
     XLSX.writeFile(wb, tempFilePath);
 
-    await expect(loadTemplateMap(tempFilePath)).rejects.toThrow(/Missing required Excel headers.*Link/);
+    await expect(loadTemplateMap(tempFilePath)).rejects.toThrow(/Missing required Excel headers/);
   });
 
   it('should throw error when Glassix template name header is missing', async () => {

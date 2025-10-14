@@ -1,9 +1,11 @@
 /**
- * Phone number normalization with E.164 format and strict Israel heuristics
+ * Phone number normalization with E.164 format and country-specific validation
+ * Uses country map abstraction for market expansion
  */
 import { parsePhoneNumber, CountryCode } from 'libphonenumber-js/max';
 import { getLogger } from './logger.js';
 import type { Logger } from 'pino';
+import { applyCountryHeuristics, isMobileNumber as checkMobileNumber } from './phone-countries.js';
 
 export class PhoneNormalizer {
   private defaultCountry: CountryCode;
@@ -46,25 +48,8 @@ export class PhoneNormalizer {
         cleaned = '+' + cleaned;
       }
 
-      // Israeli phone number strict heuristics
-      if (this.defaultCountry === 'IL') {
-        // Format: 05X-XXX-XXXX or 05XXXXXXXX (10 digits starting with 0)
-        if (cleaned.startsWith('0') && cleaned.length === 10 && cleaned.startsWith('05')) {
-          cleaned = '+972' + cleaned.substring(1);
-        }
-        // Format: 9725XXXXXXXX (12 digits starting with 972)
-        else if (cleaned.startsWith('972') && cleaned.length === 12) {
-          cleaned = '+' + cleaned;
-        }
-        // Format: +9725XXXXXXXX (already correct)
-        else if (cleaned.startsWith('+972')) {
-          // Already formatted correctly
-        }
-        // Add country code if missing and not already handled
-        else if (!cleaned.startsWith('+') && !cleaned.startsWith('972')) {
-          cleaned = '+972' + cleaned;
-        }
-      }
+      // Apply country-specific heuristics via abstraction
+      cleaned = applyCountryHeuristics(cleaned, this.defaultCountry);
 
       // Parse with libphonenumber-js (max)
       const parsed = parsePhoneNumber(cleaned, this.defaultCountry);
@@ -74,20 +59,18 @@ export class PhoneNormalizer {
         return null;
       }
 
-      // Note: We skip isValid() check as we rely on our own IL heuristics
+      // Note: We skip isValid() check as we rely on our own country-specific heuristics
       // libphonenumber-js's isValid() can be overly strict for test numbers
       const e164 = parsed.format('E.164');
 
-      // Check if mobile (unless landlines permitted)
-      if (this.defaultCountry === 'IL' && !this.permitLandlines) {
-        if (!isLikelyILMobile(e164)) {
-          this.log(
-            'warn',
-            { phoneNumber, e164 },
-            'Phone number is not a mobile number (landlines not permitted)'
-          );
-          return null;
-        }
+      // Check if mobile (unless landlines permitted) via country map
+      if (!this.permitLandlines && !checkMobileNumber(e164, this.permitLandlines)) {
+        this.log(
+          'warn',
+          { phoneNumber, e164 },
+          'Phone number is not a mobile number (landlines not permitted)'
+        );
+        return null;
       }
 
       this.log('debug', { original: phoneNumber, normalized: e164 }, 'Normalized phone number');
@@ -165,6 +148,9 @@ export function isLikelyILMobile(e164: string): boolean {
 
   return validPrefixes.includes(mobilePrefix);
 }
+
+// Re-export isAllowedE164 from country map for backward compatibility
+export { isAllowedE164 } from './phone-countries.js';
 
 /**
  * Mask an E.164 phone number

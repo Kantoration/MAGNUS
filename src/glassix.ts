@@ -1,13 +1,19 @@
 /**
- * Glassix API client with dual-mode support, retries, and idempotency
+ * Glassix API client with access-token caching, dual-mode support, and hardened security
  * Supports both 'messages' mode and 'protocols' mode for WhatsApp sends
  */
-import axios, { AxiosInstance, AxiosError } from 'axios';
+import axios, { AxiosError } from 'axios';
 import Bottleneck from 'bottleneck';
-import { getConfig } from './config.js';
+import { getConfig, USE_ACCESS_TOKEN_FLOW } from './config.js';
 import { getLogger } from './logger.js';
-import { mask } from './phone.js';
-import { GlassixSendResponseSchema, safeParse } from './schemas.js';
+import { mask, isAllowedE164 } from './phone.js';
+import { buildSafeAxiosError, isRetryableStatus, calculateBackoff } from './http-error.js';
+import { glassixSendLatency, trackRateLimit, recordSendResult } from './metrics.js';
+import {
+  parseAccessTokenResponse,
+  parseSendResponse,
+  type SendResult,
+} from './types/glassix.js';
 
 const logger = getLogger();
 
@@ -22,286 +28,208 @@ export type SendParams = {
   variables?: Record<string, string | number | boolean | null>; // Template variables
 };
 
+// Re-export SendResult type for backward compatibility
+export type { SendResult };
+
 /**
- * Send result from Glassix API
+ * Access token cache (module-level)
  */
-export type SendResult = {
-  conversationUrl?: string;
-  providerId?: string;
-};
+let cached: { token: string; expMs: number } | null = null;
 
-// Axios client instance
-let axiosClient: AxiosInstance | null = null;
+/**
+ * Rate limiter (minTime 250ms = max 4 requests/second)
+ * With debug logging for operational visibility
+ */
+const limiter = new Bottleneck({ minTime: 250 });
 
-// Rate limiter (minTime 250ms = max 4 requests/second)
-const limiter = new Bottleneck({
-  maxConcurrent: 3,
-  minTime: 250,
+// Debug logging for rate limiter queue
+limiter.on('queued', () => {
+  logger.debug({ queueSize: limiter.counts().QUEUED }, 'RateLimit queued');
 });
 
-/**
- * Initialize axios client with config
- */
-function getAxiosClient(): AxiosInstance {
-  if (axiosClient) {
-    return axiosClient;
-  }
+limiter.on('done', () => {
+  logger.debug({ queueSize: limiter.counts().QUEUED }, 'RateLimit processed');
+});
 
+// Note: Error handling utilities moved to http-error.ts for reusability
+
+/**
+ * Get access token (cached, with proactive refresh)
+ * Only called when USE_ACCESS_TOKEN_FLOW === true
+ * Exported for testing and CLI diagnostic tools
+ */
+export async function getAccessToken(): Promise<string> {
   const config = getConfig();
+  const now = Date.now();
 
-  axiosClient = axios.create({
-    baseURL: config.GLASSIX_BASE_URL,
-    timeout: 30000,
-    headers: {
-      'Content-Type': 'application/json',
-    },
-  });
-
-  return axiosClient;
-}
-
-/**
- * Sleep utility for retry backoff
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Truncate string to max length
- */
-function truncate(str: string, maxLen: number): string {
-  if (str.length <= maxLen) {
-    return str;
+  // Return cached token if valid (refresh 5 min early)
+  if (cached && now < cached.expMs - 300_000) {
+    return cached.token;
   }
-  return str.substring(0, maxLen) + '... (truncated)';
-}
 
-/**
- * Check if error is retryable (429, 502, 503, 504)
- */
-function isRetryableError(error: unknown): boolean {
-  if (!axios.isAxiosError(error)) {
-    return false;
+  // Exchange API key + secret for access token
+  const baseUrl = config.GLASSIX_BASE_URL.replace(/\/+$/, '');
+  
+  try {
+    const response = await axios.post(
+      `${baseUrl}/access-token`,
+      {
+        apiKey: config.GLASSIX_API_KEY,
+        secret: config.GLASSIX_API_SECRET,
+      },
+      {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: config.GLASSIX_TIMEOUT_MS,
+      }
+    );
+
+    // Parse and validate response
+    const tokenData = parseAccessTokenResponse(response.data);
+    
+    // If expiresIn missing, assume 3h (10800s)
+    const ttlSeconds = tokenData.expiresIn ?? 10800;
+    
+    // Refresh 60s early
+    const expMs = now + (ttlSeconds - 60) * 1000;
+    
+    cached = { token: tokenData.accessToken, expMs };
+    
+    logger.debug(
+      { ttlSeconds, expiresAt: new Date(expMs).toISOString() },
+      'Access token obtained'
+    );
+    
+    return tokenData.accessToken;
+  } catch (error) {
+    const safeMsg = buildSafeAxiosError(error);
+    
+    // Additional scrubbing for access token endpoint to prevent secret leakage
+    // This catches cases where buildSafeAxiosError might miss secrets in response bodies
+    const scrubbedMsg = safeMsg
+      .replace(/"apiKey"\s*:\s*"[^"]+"/g, '"apiKey":"[REDACTED]"')
+      .replace(/"secret"\s*:\s*"[^"]+"/g, '"secret":"[REDACTED]"')
+      .replace(/(?:apiKey|secret)"\s*:\s*"[^"]+"/g, 'apiKey":"[REDACTED]"');
+    
+    logger.error({ error: scrubbedMsg }, 'Failed to get access token');
+    throw new Error(`Access token exchange failed: ${scrubbedMsg}`);
   }
-  const status = error.response?.status;
-  return status === 429 || status === 502 || status === 503 || status === 504;
 }
 
 /**
- * Build request body based on API mode
+ * Get bearer token for Authorization header
+ * - If USE_ACCESS_TOKEN_FLOW: fetches/caches access token
+ * - Else: returns legacy GLASSIX_API_KEY
  */
-function buildRequestBody(
-  mode: 'messages' | 'protocols',
-  params: SendParams
-): { endpoint: string; body: Record<string, unknown> } {
+function getBearer(): string {
+  const config = getConfig();
+  return config.GLASSIX_API_KEY!;
+}
+
+/**
+ * Build Authorization header
+ */
+async function authHeader(): Promise<{ Authorization: string }> {
+  if (USE_ACCESS_TOKEN_FLOW) {
+    const token = await getAccessToken();
+    return { Authorization: `Bearer ${token}` };
+  } else {
+    return { Authorization: `Bearer ${getBearer()}` };
+  }
+}
+
+/**
+ * Send WhatsApp message (single attempt, no retry)
+ */
+async function sendOnce(params: SendParams): Promise<SendResult> {
+  const config = getConfig();
+  const base = config.GLASSIX_BASE_URL.replace(/\/+$/, '');
+  const mode = config.GLASSIX_API_MODE;
+
+  // Build URL and body based on API mode
+  let url: string;
+  let body: Record<string, unknown>;
+
   if (mode === 'messages') {
     if (params.templateId) {
       // Template mode
-      return {
-        endpoint: '/api/messages/template',
-        body: {
-          channel: 'whatsapp',
-          to: params.toE164,
-          templateId: params.templateId,
-          variables: params.variables ?? {},
-        },
+      url = `${base}/api/messages/template`;
+      body = {
+        channel: 'whatsapp',
+        to: params.toE164,
+        templateId: params.templateId,
+        variables: params.variables ?? {},
       };
     } else {
       // Free text mode
-      return {
-        endpoint: '/api/messages',
-        body: {
-          channel: 'whatsapp',
-          to: params.toE164,
-          type: 'text',
-          text: params.text,
-        },
+      url = `${base}/api/messages`;
+      body = {
+        channel: 'whatsapp',
+        to: params.toE164,
+        type: 'text',
+        text: params.text,
       };
     }
   } else {
     // protocols mode
-    return {
-      endpoint: '/v1/protocols/send',
-      body: {
-        protocol: 'whatsapp',
-        to: params.toE164,
-        content: {
-          type: 'text',
-          text: params.text,
-        },
-        ...(params.templateId ? { templateId: params.templateId } : {}),
-        ...(params.variables ? { variables: params.variables } : {}),
+    url = `${base}/v1/protocols/send`;
+    body = {
+      protocol: 'whatsapp',
+      to: params.toE164,
+      content: {
+        type: 'text',
+        text: params.text,
       },
+      ...(params.templateId ? { templateId: params.templateId } : {}),
+      ...(params.variables ? { variables: params.variables } : {}),
     };
   }
-}
 
-/**
- * Parse response to extract conversation URL and provider ID
- */
-function parseResponse(data: unknown): SendResult {
-  if (!data || typeof data !== 'object') {
-    return { conversationUrl: undefined, providerId: undefined };
-  }
+  // Build headers (auth + idempotency)
+  const auth = await authHeader();
+  const headers = {
+    ...auth,
+    'Content-Type': 'application/json',
+    'Idempotency-Key': params.idemKey,
+  };
 
-  const obj = data as Record<string, unknown>;
-  
-  const conversationUrl = 
-    (typeof obj.conversationUrl === 'string' ? obj.conversationUrl : undefined) ||
-    (obj.conversation && typeof obj.conversation === 'object' && 
-      'url' in obj.conversation && typeof (obj.conversation as Record<string, unknown>).url === 'string' 
-        ? (obj.conversation as Record<string, unknown>).url as string 
-        : undefined);
+  // Track latency with histogram
+  const endTimer = glassixSendLatency.startTimer();
 
-  const providerId =
-    (typeof obj.id === 'string' ? obj.id : undefined) ||
-    (typeof obj.messageId === 'string' ? obj.messageId : undefined) ||
-    (obj.conversation && typeof obj.conversation === 'object' && 
-      'id' in obj.conversation && typeof (obj.conversation as Record<string, unknown>).id === 'string'
-        ? (obj.conversation as Record<string, unknown>).id as string
-        : undefined);
+  try {
+    // Make request
+    const response = await axios.post(url, body, {
+      headers,
+      timeout: config.GLASSIX_TIMEOUT_MS,
+    });
 
-  return { conversationUrl, providerId };
-}
+    // Track latency
+    endTimer();
 
-/**
- * Build safe error message (no secrets, truncated)
- */
-function buildErrorMessage(error: unknown): string {
-  if (!axios.isAxiosError(error)) {
-    return error instanceof Error ? error.message : String(error);
-  }
-
-  const status = error.response?.status || 'unknown';
-  const statusText = error.response?.statusText || 'unknown';
-
-  let detail = '';
-  if (error.response?.data) {
-    try {
-      const dataStr =
-        typeof error.response.data === 'string'
-          ? error.response.data
-          : JSON.stringify(error.response.data);
-      detail = truncate(dataStr, 500);
-    } catch {
-      detail = String(error.response.data);
+    // Track rate limit headers if present
+    if (response.headers) {
+      trackRateLimit(response.headers);
     }
-  } else {
-    detail = error.message || 'Unknown error';
+
+    // Parse and validate response
+    return parseSendResponse(response.data);
+  } catch (error) {
+    // Track latency even on error
+    endTimer();
+    throw error;
   }
-
-  return `${status} ${statusText} :: ${detail}`;
-}
-
-/**
- * Send WhatsApp message with retry logic
- */
-async function sendWithRetry(
-  client: AxiosInstance,
-  endpoint: string,
-  body: Record<string, unknown>,
-  headers: Record<string, string>,
-  params: SendParams
-): Promise<SendResult> {
-  const config = getConfig();
-  const maxAttempts = config.RETRY_ATTEMPTS;
-  const baseDelayMs = config.RETRY_BASE_MS;
-
-  let lastError: AxiosError | null = null;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const response = await client.post(endpoint, body, { headers });
-
-      // Validate response with Zod schema
-      const validatedData = safeParse(
-        GlassixSendResponseSchema,
-        response.data,
-        'Glassix response'
-      );
-
-      if (!validatedData) {
-        logger.warn(
-          { to: mask(params.toE164) },
-          'Glassix response validation failed, using fallback parsing'
-        );
-      }
-
-      const result: unknown = validatedData || response.data;
-      const providerId = validatedData?.id || (result && typeof result === 'object' && 'id' in result ? String((result as Record<string, unknown>).id) : undefined);
-
-      logger.debug(
-        {
-          to: mask(params.toE164),
-          template: !!params.templateId,
-          attempt,
-          providerId,
-        },
-        'Glassix send succeeded'
-      );
-
-      return parseResponse(result);
-    } catch (error: unknown) {
-      if (axios.isAxiosError(error)) {
-        lastError = error;
-
-        const status = error.response?.status;
-        const isRetryable = isRetryableError(error);
-
-        logger.warn(
-          {
-            to: mask(params.toE164),
-            status,
-            code: error.code,
-            attempt,
-            retryable: isRetryable,
-          },
-          'Glassix send failed'
-        );
-
-        // Retry on retryable errors if we have attempts left
-        if (isRetryable && attempt < maxAttempts) {
-          // Exponential backoff with jitter
-          const exponentialDelay = baseDelayMs * Math.pow(2, attempt - 1);
-          const jitter = Math.floor(Math.random() * 100);
-          const delay = exponentialDelay + jitter;
-          
-          logger.debug({ attempt, delay, base: baseDelayMs }, 'Retrying after backoff');
-          await sleep(delay);
-          continue;
-        }
-
-        // No more retries or non-retryable error
-        throw new Error(buildErrorMessage(error));
-      }
-
-      // Non-Axios error
-      logger.error(
-        { to: mask(params.toE164), error: String(error) },
-        'Unexpected error sending WhatsApp message'
-      );
-      throw new Error(
-        error instanceof Error ? error.message : String(error)
-      );
-    }
-  }
-
-  // Should never reach here, but for type safety
-  throw new Error(lastError ? buildErrorMessage(lastError) : 'Send failed after retries');
 }
 
 /**
  * Send WhatsApp message via Glassix API
- * Supports both free-text and template modes
- * Includes retries, idempotency, and DRY_RUN support
+ * - Validates phone number (centralized country logic)
+ * - Supports DRY_RUN mode
+ * - Retries on transient errors (429, 502, 503, 504)
+ * - Rate-limited via Bottleneck
  */
 export async function sendWhatsApp(params: SendParams): Promise<SendResult> {
-  // Validate E.164 format (must start with +972)
-  if (!params.toE164.startsWith('+972')) {
-    throw new Error(
-      `Invalid phone number format: ${mask(params.toE164)}. Must start with +972`
-    );
+  // Validate phone number using centralized country logic
+  if (!isAllowedE164(params.toE164)) {
+    throw new Error(`Invalid phone number format: ${mask(params.toE164)}. Only Israeli (+972) numbers are supported.`);
   }
 
   // DRY_RUN mode
@@ -314,36 +242,50 @@ export async function sendWhatsApp(params: SendParams): Promise<SendResult> {
       },
       'DRY_RUN glassix.send'
     );
-    return { conversationUrl: undefined, providerId: 'dry-run' };
+    return { providerId: 'dry-run' };
   }
 
   const config = getConfig();
-  const client = getAxiosClient();
+  const attempts = config.RETRY_ATTEMPTS;
+  const base = config.RETRY_BASE_MS;
 
-  // Build request based on API mode
-  const { endpoint, body } = buildRequestBody(config.GLASSIX_API_MODE, params);
+  // Retry wrapper
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const result = await limiter.schedule(() => sendOnce(params));
+      
+      // Record successful send
+      recordSendResult('ok');
+      
+      return result;
+    } catch (e) {
+      const status = (e as AxiosError)?.response?.status;
+      const msg = buildSafeAxiosError(e);
 
-  // Build headers (Authorization header will be redacted by logger)
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${config.GLASSIX_API_KEY}`,
-    'Idempotency-Key': params.idemKey,
-  };
+      logger.warn(
+        { to: mask(params.toE164), attempt, status },
+        'glassix.send failed'
+      );
 
-  logger.debug(
-    {
-      to: mask(params.toE164),
-      endpoint,
-      mode: config.GLASSIX_API_MODE,
-      template: !!params.templateId,
-      idemKey: params.idemKey,
-    },
-    'Sending WhatsApp message'
-  );
+      // Throw immediately if non-retryable or last attempt
+      if (attempt >= attempts || !isRetryableStatus(status)) {
+        // Record final failure
+        recordSendResult('fail');
+        throw new Error(msg);
+      }
 
-  // Use rate limiter to schedule the send with retry
-  return limiter.schedule(() =>
-    sendWithRetry(client, endpoint, body, headers, params)
-  );
+      // Record retry attempt
+      recordSendResult('retry');
+
+      // Exponential backoff with jitter (configurable)
+      const backoff = calculateBackoff(attempt, base);
+      await new Promise((r) => setTimeout(r, backoff));
+    }
+  }
+
+  // Should never reach here
+  recordSendResult('fail');
+  throw new Error('Send failed after retries');
 }
 
 /**

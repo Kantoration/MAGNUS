@@ -1,17 +1,817 @@
-# AutoMessager
+# 📱 AutoMessager - Automated WhatsApp Communication System
 
-Automation worker that reads Salesforce Tasks and sends WhatsApp messages via Glassix.
+> **A production-ready automation that connects Salesforce tasks with WhatsApp messaging through Glassix, enabling personalized, timely customer communications at scale.**
 
-## Features
+---
 
-- 📋 Fetches daily tasks from Salesforce
-- 📞 Looks up contact phone numbers with E.164 normalization
-- 💬 Sends personalized WhatsApp messages via Glassix API
-- 📊 Loads message templates from Excel file
-- 🌐 Supports Hebrew and English message templates
-- 📝 Structured logging with Pino
-- 🔒 Type-safe configuration with Zod validation
-- ⚡ Rate-limited API calls with Bottleneck
+## 🎯 What Does This System Do?
+
+AutoMessager is an intelligent automation system that:
+
+1. **Monitors your Salesforce** for tasks that need customer communication
+2. **Retrieves customer information** (name, phone, account) from your CRM
+3. **Selects the right message template** from your Excel library
+4. **Personalizes each message** with customer-specific details
+5. **Sends WhatsApp messages** through Glassix platform
+6. **Updates Salesforce** with delivery status and conversation links
+7. **Handles errors gracefully** and retries when needed
+
+**In simple terms**: It automates sending the right WhatsApp message to the right customer at the right time, based on your Salesforce workflow.
+
+---
+
+## 💼 Business Value
+
+### For Sales & Customer Service Teams
+- ✅ **Save time** - No manual message sending
+- ✅ **Consistency** - Every customer gets the correct message
+- ✅ **Scalability** - Handle hundreds of customers per day
+- ✅ **Tracking** - Full audit trail in Salesforce
+- ✅ **Personalization** - Each message includes customer name, dates, and relevant links
+
+### For Management
+- ✅ **Visibility** - See all communications logged in Salesforce
+- ✅ **Reliability** - Automatic retries and error handling
+- ✅ **Compliance** - All messages tracked and auditable
+- ✅ **Metrics** - Count of sent/failed messages per run
+
+### For IT/DevOps
+- ✅ **Security** - PII masked in logs, secrets never exposed
+- ✅ **Scalability** - Handles unlimited tasks with paging
+- ✅ **Monitoring** - Structured logs with full context
+- ✅ **Flexibility** - 17 configuration options
+
+---
+
+## 🆘 Quick Help
+
+**Something not working?** Run these commands:
+
+```bash
+automessager doctor    # Diagnose all systems
+automessager verify    # Quick health check
+```
+
+**Need support?** Create a safe diagnostic bundle:
+
+```bash
+automessager support-bundle
+# Creates redacted ZIP with logs (no secrets)
+```
+
+**See also:** [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for top 10 issues
+
+---
+
+## ❓ FAQ (Frequently Asked Questions)
+
+### Where do I put the `.env` and Excel files?
+
+**Answer:** In the same folder as the `automessager` binary.
+
+**For binaries:**
+- Windows: Same folder as `automessager-win.exe`
+- macOS: Same folder as `automessager-mac`
+
+**For source install:**
+- Project root directory
+
+```
+📁 AutoMessager/
+  ├── automessager-win.exe (or automessager-mac)
+  ├── .env                 ← Your config here
+  ├── massege_maping.xlsx  ← Your templates here
+  └── logs/                ← Auto-created
+```
+
+### How do I schedule daily runs?
+
+**Windows (Task Scheduler):**
+```powershell
+# Run as Administrator
+cd scripts\windows
+.\Install-Task.ps1 -Hour 9 -Minute 0
+
+# Test it
+Start-ScheduledTask -TaskName "AutoMessager"
+```
+
+**macOS/Linux (cron):**
+```bash
+crontab -e
+# Add this line (runs at 9:00 AM daily):
+0 9 * * * /path/to/automessager-mac run >> /path/to/logs/cron.log 2>&1
+```
+
+**See:** [SETUP.md](SETUP.md#step-6-schedule-daily-runs-optional) for details
+
+### How do I change the Excel sheet name?
+
+**Answer:** Add to your `.env` file:
+
+```bash
+# Use sheet by name
+XSLX_SHEET=Sheet2
+
+# Or by index (0-based)
+XSLX_SHEET=1
+```
+
+Default: First sheet (index 0)
+
+### Can I use legacy bearer authentication?
+
+**Answer:** Yes, but not recommended for production.
+
+**Legacy mode (single API key):**
+```bash
+# .env file
+GLASSIX_API_KEY=your-api-key-here
+ALLOW_LEGACY_BEARER=true
+```
+
+**Modern mode (recommended - more secure):**
+```bash
+# .env file
+GLASSIX_API_KEY=your-api-key-here
+GLASSIX_API_SECRET=your-api-secret-here
+# SAFE_MODE_STRICT=true (default)
+```
+
+The modern flow uses short-lived access tokens (3 hours) for better security.
+
+### How do I test without sending real messages?
+
+**Answer:** Use dry-run mode:
+
+```bash
+automessager dry-run
+```
+
+This simulates everything WITHOUT actually sending WhatsApp messages or updating Salesforce.
+
+**Output shows:**
+- `Previewed: X` instead of `Sent: X`
+- All processing logic runs
+- Logs show what WOULD happen
+- Safe for testing template changes
+
+### What if I get "Secure authentication required" error?
+
+**Answer:** Add `GLASSIX_API_SECRET` to your `.env`:
+
+```bash
+# Option 1: Add the secret (recommended)
+GLASSIX_API_SECRET=your-api-secret-here
+
+# Option 2: Allow legacy mode (not recommended)
+ALLOW_LEGACY_BEARER=true
+```
+
+Run `automessager init` to update your configuration interactively.
+
+### Where are the log files?
+
+**Answer:** In the `logs/` folder:
+
+```bash
+logs/
+  ├── automessager.log      # Main application log
+  ├── run-20251014.log      # Daily scheduled runs
+  └── cron.log              # Cron output (macOS/Linux)
+```
+
+**View recent logs:**
+```bash
+# Windows
+Get-Content .\logs\automessager.log -Tail 50
+
+# macOS/Linux
+tail -50 ./logs/automessager.log
+```
+
+### How do I update message templates?
+
+**Answer:** Just edit your Excel file and save:
+
+1. Open `massege_maping.xlsx`
+2. Update the `מלל הודעה` column
+3. Save the file
+4. Validate: `automessager verify:mapping`
+5. Next run uses new templates automatically!
+
+AutoMessager reloads templates when the file timestamp changes.
+
+### Can I run this on multiple computers?
+
+**Answer:** Yes! Each computer needs:
+
+- ✅ The binary for its platform (Windows/macOS)
+- ✅ Its own `.env` file with credentials
+- ✅ Copy of the Excel file
+- ✅ Network access to Salesforce & Glassix
+
+**Pro tip:** Use the same `.env` and Excel on all machines, or customize per region.
+
+### What phone number formats are supported?
+
+**Answer:** E.164 format with Israel country code:
+
+**✅ Valid:**
+- `+972501234567`
+- `+972-50-123-4567` (dashes auto-removed)
+
+**❌ Invalid:**
+- `0501234567` (missing +972)
+- `050-123-4567` (missing country code)
+- `+1234567890` (non-Israel, unless you modify `src/phone.ts`)
+
+**Default:** Mobile numbers only  
+**To allow landlines:** Set `PERMIT_LANDLINES=true` in `.env`
+
+---
+
+## 🚀 Quickstart (Binary Client - No Node.js Required)
+
+**For end users running the standalone binary:**
+
+### Windows
+
+1. **Extract the client kit:**
+   ```
+   AutoMessager-ClientKit-v1.0.0\win\automessager-win.exe
+   ```
+
+2. **Create `.env` file** (see templates/.env.example)
+
+3. **Add your Excel file** to the same folder
+
+4. **Run setup:**
+   ```powershell
+   .\automessager-win.exe init
+   ```
+
+5. **Verify:**
+   ```powershell
+   .\automessager-win.exe doctor
+   ```
+
+6. **Test:**
+   ```powershell
+   .\automessager-win.exe dry-run
+   ```
+
+7. **Go live:**
+   ```powershell
+   .\automessager-win.exe run
+   ```
+
+### macOS
+
+1. **Extract the client kit:**
+   ```
+   AutoMessager-ClientKit-v1.0.0/mac/automessager-mac
+   ```
+
+2. **Remove security block:**
+   ```bash
+   xattr -dr com.apple.quarantine ./automessager-mac
+   codesign --force --deep --sign - ./automessager-mac
+   ```
+
+3. **Create `.env` file** (see templates/.env.example)
+
+4. **Add your Excel file** to the same folder
+
+5. **Run setup:**
+   ```bash
+   ./automessager-mac init
+   ```
+
+6. **Verify:**
+   ```bash
+   ./automessager-mac doctor
+   ```
+
+7. **Test:**
+   ```bash
+   ./automessager-mac dry-run
+   ```
+
+8. **Go live:**
+   ```bash
+   ./automessager-mac run
+   ```
+
+**See:** [docs/README-QUICKSTART.md](docs/README-QUICKSTART.md) for the complete 5-minute guide.
+
+---
+
+## 🚀 Quickstart (Source Install - For Developers)
+
+This section is for developers installing and running AutoMessager from source.
+
+### Prerequisites
+
+- **Node.js 20+** - [Download from nodejs.org](https://nodejs.org/)
+- **Salesforce account** with API access
+- **Glassix account** with API credentials
+- **Excel mapping file** (`massege_maping.xlsx`)
+
+### Step 1: Installation
+
+Clone or download this project to your local machine:
+
+```bash
+# Example Windows path
+C:\Users\User\Desktop\MAGNUS\AutoMessager\
+
+# Example macOS/Linux path
+~/AutoMessager/
+```
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Build the project:
+
+```bash
+npm run build
+```
+
+### Step 2: Interactive Setup
+
+Run the setup wizard to create your `.env` configuration file:
+
+```bash
+# Using npm script (development)
+npm run cli:init
+
+# Or using built CLI (production)
+npx automessager init
+
+# Or if installed globally
+automessager init
+```
+
+The wizard will guide you through:
+- **Salesforce credentials** (login URL, username, password, security token)
+- **Glassix authentication** (modern access token flow or legacy mode)
+- **Excel mapping file** path (auto-detected for Windows)
+- **Behavior settings** (phone field name, landlines, retry policy)
+
+**Windows Default Excel Path:**
+```
+C:\Users\User\Desktop\MAGNUS\AutoMessager\massege_maping.xlsx
+```
+
+**macOS/Linux Default:**
+```
+./massege_maping.xlsx
+```
+
+### Step 3: Verify Configuration
+
+Run the verification tool to test all connections:
+
+```bash
+npm run cli:verify
+# or
+automessager verify
+```
+
+This will check:
+- ✔ **Excel Mapping** - File exists, templates loaded
+- ✔ **Salesforce Login** - API access, org ID
+- ✔ **Glassix Auth** - Token exchange or legacy key
+- ✔ **Phone Normalization** - E.164 format conversion
+
+**Expected Output:**
+```
+┌─────────────────────────┬────────┬─────────────────────────────────────┐
+│ Check                   │ Status │ Message                             │
+├─────────────────────────┼────────┼─────────────────────────────────────┤
+│ Excel Mapping           │ ✔      │ 10 templates loaded                 │
+│ Salesforce Login        │ ✔      │ Connected successfully              │
+│ Glassix Auth            │ ✔      │ Access token obtained               │
+│ Phone Normalization     │ ✔      │ Phone normalization working         │
+└─────────────────────────┴────────┴─────────────────────────────────────┘
+
+✅ All checks passed!
+```
+
+If any check fails, review the error details and fix the configuration.
+
+### Step 4: Test with Dry-Run
+
+Preview message sends without actually sending:
+
+```bash
+npm run cli:dry
+# or
+automessager dry-run
+```
+
+**Output:**
+```
+📊 Dry-Run Summary:
+  Total tasks: 25
+  Previewed: 20
+  Skipped: 3
+  Failed: 2
+```
+
+Review the logs in `./logs/automessager.log` to ensure everything works as expected.
+
+### Step 5: Run Live
+
+Execute the automation to send messages:
+
+```bash
+npm run cli:run
+# or
+automessager run
+```
+
+**Output:**
+```
+📊 Run Summary:
+  Total tasks: 25
+  Sent: 20
+  Skipped: 3
+  Failed: 2
+```
+
+Logs are saved to:
+- **Console**: Real-time output with colors
+- **File**: `./logs/automessager.log` (persistent)
+- **Daily logs**: `./logs/run-YYYYMMDD.log` (when using scheduler scripts)
+
+### Step 6: Schedule Daily Runs (Optional)
+
+#### Windows - Task Scheduler
+
+Open PowerShell **as Administrator** and run:
+
+```powershell
+# Install daily task (runs at 9:00 AM)
+.\scripts\windows\Install-Task.ps1 -Hour 9 -Minute 0
+
+# Verify task was created
+Get-ScheduledTask -TaskName "AutoMessager"
+
+# Test task manually
+Start-ScheduledTask -TaskName "AutoMessager"
+
+# View logs
+Get-Content .\logs\run-*.log -Tail 50
+
+# Remove task
+.\scripts\windows\Uninstall-Task.ps1
+```
+
+**Advanced Options:**
+
+```powershell
+# Custom task name and schedule
+.\scripts\windows\Install-Task.ps1 `
+  -TaskName "AutoMessager-Morning" `
+  -Hour 8 `
+  -Minute 30
+
+# Dry-run mode for testing
+.\scripts\windows\Install-Task.ps1 `
+  -Hour 9 `
+  -Minute 0 `
+  -UseDryRun
+```
+
+The task will:
+- Run daily at the specified time
+- Use the project's working directory
+- Log output to `./logs/run-YYYYMMDD.log`
+- Run even if user is not logged in
+- Skip if a previous run is still active
+
+#### macOS/Linux - Cron
+
+Make the script executable (already done in repo):
+
+```bash
+chmod +x scripts/macos/start.sh
+```
+
+Edit your crontab:
+
+```bash
+crontab -e
+```
+
+Add a daily job (example: 9:00 AM):
+
+```cron
+# AutoMessager daily run at 9:00 AM
+0 9 * * * /path/to/AutoMessager/scripts/macos/start.sh >> /path/to/AutoMessager/logs/cron.log 2>&1
+```
+
+**Dry-run mode:**
+
+```cron
+0 9 * * * /path/to/AutoMessager/scripts/macos/start.sh --dry-run >> /path/to/AutoMessager/logs/cron.log 2>&1
+```
+
+### Step 7: Packaging to Standalone Binary (Advanced)
+
+For deployment to client machines without Node.js:
+
+```bash
+# Build Windows executable
+npm run package:win
+# Output: build/bin/automessager-win.exe
+
+# Build macOS executable
+npm run package:mac
+# Output: build/bin/automessager-mac
+```
+
+**Running the binary:**
+
+```powershell
+# Windows
+.\build\bin\automessager-win.exe init
+.\build\bin\automessager-win.exe verify
+.\build\bin\automessager-win.exe run
+
+# macOS
+./build/bin/automessager-mac init
+./build/bin/automessager-mac verify
+./build/bin/automessager-mac run
+```
+
+**Note:** The binary still requires:
+- `.env` file in the same directory
+- Excel mapping file at the configured path
+- Network access to Salesforce and Glassix APIs
+
+### Troubleshooting
+
+#### Issue: "Excel file not found"
+**Solution:** Run `automessager init` again and ensure the path to `massege_maping.xlsx` is correct. On Windows, use double backslashes (`C:\\Users\\...`) or forward slashes (`C:/Users/...`).
+
+#### Issue: "Salesforce login failed"
+**Solution:** 
+- Verify credentials in `.env`
+- Check `SF_LOGIN_URL` (use `https://test.salesforce.com` for sandbox)
+- Ensure security token is appended to password internally by the system (don't append it manually)
+
+#### Issue: "Glassix auth failed"
+**Solution:**
+- For modern mode: Ensure both `GLASSIX_API_KEY` and `GLASSIX_API_SECRET` are set
+- For legacy mode: Ensure only `GLASSIX_API_KEY` is set (no secret)
+- Test with `automessager verify`
+
+#### Issue: "No templates loaded"
+**Solution:**
+- Open Excel file and verify columns exist: `name`, `מלל הודעה`, `Link`, `שם הודעה מובנית בגלאסיקס`
+- Ensure at least one row has data in both `name` and `מלל הודעה`
+- Run `npm run verify:mapping` for detailed diagnostics
+
+#### Issue: "Task Scheduler not running"
+**Solution:**
+- Verify task exists: `Get-ScheduledTask -TaskName "AutoMessager"`
+- Check task history in Task Scheduler UI (`taskschd.msc`)
+- Test manually: `Start-ScheduledTask -TaskName "AutoMessager"`
+- Ensure working directory and script paths are correct
+
+### CLI Command Reference
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `automessager init` | Interactive setup wizard | `npm run cli:init` |
+| `automessager verify` | Run connectivity checks | `npm run cli:verify` |
+| `automessager dry-run` | Preview without sending | `npm run cli:dry` |
+| `automessager run` | Execute live automation | `npm run cli:run` |
+| `automessager version` | Show version info | `automessager version` |
+
+---
+
+## 🔄 How It Works (The Algorithm)
+
+### Simple Explanation
+
+Think of AutoMessager as a smart assistant that:
+
+1. **Checks Salesforce** every time it runs for tasks marked "Ready for Automation"
+2. **For each task**, it:
+   - Finds the customer's phone number
+   - Looks up the correct message template based on task type
+   - Fills in personalization (customer name, dates, links)
+   - Sends the WhatsApp message
+   - Updates Salesforce with "Completed" status
+3. **Handles problems** by marking tasks as "Waiting" with error details
+
+### Detailed Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  1. STARTUP                                                  │
+│  • Load configuration from environment                       │
+│  • Connect to Salesforce                                     │
+│  • Probe which custom fields exist                          │
+│  • Load message templates from Excel                        │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│  2. FETCH TASKS                                             │
+│  • Query: Ready_for_Automation__c = true                    │
+│  • Include: Contact/Lead info, Account name                 │
+│  • Limit: 200 tasks (or use paging for more)               │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│  3. FOR EACH TASK (5 concurrent)                            │
+│                                                              │
+│  A. Get Task Type                                           │
+│     • From Task_Type_Key__c field OR Subject                │
+│     • Normalize: "New Phone" → NEW_PHONE                    │
+│                                                              │
+│  B. Find Customer Phone                                      │
+│     • Priority: Task.Phone__c                               │
+│     •   → Contact.MobilePhone                               │
+│     •   → Contact.Phone                                     │
+│     •   → Lead.MobilePhone/Phone                            │
+│     • Normalize to: +972XXXXXXXXX (E.164 format)            │
+│     • Skip if no valid phone found                          │
+│                                                              │
+│  C. Pick Message Template                                    │
+│     • Match task type to Excel mapping                      │
+│     • Get Hebrew/English text                               │
+│     • Get optional Glassix template ID                      │
+│     • Skip if template not found                            │
+│                                                              │
+│  D. Personalize Message                                      │
+│     • Replace {{first_name}} with customer name             │
+│     • Replace {{account_name}} with company                 │
+│     • Replace {{date}} with today's date (09/10/2025)       │
+│     • Replace {{link}} with tracking URL                    │
+│     • Add any custom variables from Context_JSON__c         │
+│                                                              │
+│  E. Send WhatsApp                                            │
+│     • Via Glassix API                                       │
+│     • Rate limited: Max 4 messages/second                   │
+│     • Retry up to 3x on failures (429, 502, 503, 504)      │
+│     • Use Task.Id as idempotency key                        │
+│     • Log masked phone (+9725******67)                      │
+│                                                              │
+│  F. Update Salesforce                                        │
+│     • On Success:                                           │
+│       - Status: "Completed"                                 │
+│       - Delivery_Status__c: "SENT"                          │
+│       - Append audit line to Description                    │
+│       - Store Glassix conversation URL                      │
+│     • On Failure:                                           │
+│       - Status: "Waiting on External"                       │
+│       - Store error reason                                  │
+│       - Keep Ready flag for retry                           │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│  4. COMPLETION                                              │
+│  • Log summary: Total, Sent, Failed, Skipped                │
+│  • Disconnect from Salesforce                               │
+│  • Exit with status code                                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📋 Use Cases
+
+### Use Case 1: New Phone Device Ready
+**Scenario**: Customer ordered a new phone, device has arrived  
+**Salesforce**: Task created with Subject "New Phone Ready"  
+**Action**: Send personalized WhatsApp notification with pickup details  
+**Result**: Customer receives message, task marked completed, Glassix link saved
+
+### Use Case 2: Payment Reminder
+**Scenario**: Customer has pending payment due today  
+**Salesforce**: Task created with Subject "Payment Reminder"  
+**Action**: Send WhatsApp with payment link and amount  
+**Result**: Customer receives reminder, task completed
+
+### Use Case 3: Appointment Confirmation
+**Scenario**: Customer has scheduled appointment  
+**Salesforce**: Task with Subject "Appointment Confirm"  
+**Action**: Send confirmation with date, time, and location  
+**Result**: Customer confirmed, reduces no-shows
+
+### Use Case 4: Service Update
+**Scenario**: Device repair completed  
+**Salesforce**: Task "Service Complete"  
+**Action**: Notify customer device is ready  
+**Result**: Faster pickup, better customer satisfaction
+
+### Use Case 5: Bulk Campaign
+**Scenario**: 500 customers need monthly newsletter  
+**Salesforce**: 500 tasks created in bulk  
+**Action**: System processes in pages, sends to all  
+**Result**: Entire campaign completed in minutes
+
+---
+
+## 🏗️ System Infrastructure
+
+### Architecture Overview
+
+```
+┌──────────────────┐
+│   Salesforce     │  ← Source of Truth
+│   (CRM System)   │     • Customer data
+│                  │     • Tasks to process
+└────────┬─────────┘     • Update tracking
+         │
+         │ 1. Fetch Tasks
+         │ (SOQL Query)
+         ↓
+┌──────────────────┐
+│  AutoMessager    │  ← This Application
+│  (Node.js App)   │     • Reads tasks
+│                  │     • Loads templates
+│  Components:     │     • Personalizes messages
+│  • sf.ts         │     • Orchestrates flow
+│  • templates.ts  │
+│  • run.ts        │
+└────────┬─────────┘
+         │
+         │ 2. Send Messages
+         │ (HTTP API)
+         ↓
+┌──────────────────┐
+│    Glassix       │  ← WhatsApp Gateway
+│  (Messaging API) │     • Delivers WhatsApp
+│                  │     • Provides conversation URLs
+└────────┬─────────┘     • Returns delivery status
+         │
+         │ 3. Deliver
+         │
+         ↓
+┌──────────────────┐
+│    Customer      │  ← End User
+│  (WhatsApp)      │     • Receives message
+│                  │     • Can respond
+└──────────────────┘
+```
+
+### Technology Stack
+
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Language** | TypeScript | Type safety and developer productivity |
+| **Runtime** | Node.js 20+ | Server-side JavaScript execution |
+| **CRM Integration** | jsforce | Salesforce API client |
+| **Messaging** | Glassix API | WhatsApp message delivery |
+| **Templates** | Excel (XLSX) | Business-friendly template management |
+| **Validation** | Zod | Runtime type checking |
+| **Logging** | Pino | High-performance structured logging |
+| **Phone** | libphonenumber-js | International phone number validation |
+| **Date/Time** | dayjs | Date formatting (Asia/Jerusalem TZ) |
+| **Rate Limiting** | Bottleneck | API rate limit compliance |
+| **Concurrency** | p-map | Parallel task processing |
+
+### Key Features
+
+#### 🛡️ **Reliability**
+- **Automatic retries** - Exponential backoff on failures
+- **Error recovery** - Graceful degradation, never crashes
+- **Idempotency** - Safe to re-run without duplicates
+- **Field detection** - Works with or without custom Salesforce fields
+- **Process handlers** - Clean shutdown on system signals
+
+#### ⚡ **Performance**
+- **Concurrent processing** - 5 tasks in parallel
+- **Paging support** - Handle thousands of tasks
+- **Template caching** - Reload only when file changes
+- **Rate limiting** - Respects Glassix API limits (250ms between calls)
+
+#### 🔒 **Security**
+- **PII masking** - Phone numbers never appear in logs
+- **Secret redaction** - API keys and passwords automatically hidden
+- **Type safety** - 100% TypeScript strict mode
+- **Input validation** - All external data validated with Zod schemas
+
+#### 🎨 **Flexibility**
+- **17 configuration options** - Tune for your needs
+- **DRY_RUN mode** - Preview without sending
+- **Header aliasing** - Excel columns can be Name/name/NAME
+- **Sheet selection** - Use any sheet in your workbook
+- **Landline support** - Configurable mobile-only or include landlines
+
+---
+
+## 📊 Features
 
 ## Prerequisites
 
@@ -27,6 +827,83 @@ Automation worker that reads Salesforce Tasks and sends WhatsApp messages via Gl
 npm install
 ```
 
+## 🔌 Integrations Overview
+
+AutoMessager integrates with two external systems using secure authentication flows:
+
+### Salesforce Authentication (OAuth 2.0)
+- **Method**: Username-Password OAuth flow via [jsforce](https://jsforce.github.io/)
+- **Required credentials**:
+  - `SF_USERNAME` - Your Salesforce username (email)
+  - `SF_PASSWORD` - Your Salesforce password
+  - `SF_TOKEN` - Security token from Salesforce (append to password internally)
+  - `SF_LOGIN_URL` - Login endpoint (production: `https://login.salesforce.com`, sandbox: `https://test.salesforce.com`)
+- **Token lifecycle**: jsforce handles session management and automatic refresh
+- **Permissions needed**: Read Tasks/Contacts/Leads, Update Tasks
+
+#### Field Detection & Graceful Degradation
+- On startup, the system probes Task object fields using `describeTaskFields()` 
+- Only updates fields that exist in your Salesforce org
+- **Optional custom fields** (will skip if missing):
+  - `Delivery_Status__c` (Text) - Set to "SENT" on success
+  - `Last_Sent_At__c` (DateTime) - Timestamp of message send
+  - `Glassix_Conversation_URL__c` (URL) - Link to conversation
+  - `Failure_Reason__c` (Text, 1000 chars) - Truncated error on failure
+  - `Ready_for_Automation__c` (Checkbox) - Kept `true` on failure when `KEEP_READY_ON_FAIL=true`
+  - `Audit_Trail__c` (Long Text, 32K chars) - **Preferred** for bounded audit log
+- **Fallback behavior**: If custom fields don't exist, uses standard fields (e.g., Description) and logs helpful warnings
+
+#### Bounded Audit Trail
+- Message sends append audit lines to `Audit_Trail__c` (preferred) or `Description` (fallback)
+- Format: `[ISO_timestamp] WhatsApp → +9725******67 (provId=msg-123)`
+- **Bounded to 32,000 characters** - old entries automatically truncated from the start
+- Prevents field overflow errors in Salesforce
+
+#### Paging Support for Large Backlogs
+- **Default mode**: Single SOQL query (up to `TASKS_QUERY_LIMIT`, default 200)
+- **Paged mode**: Set `PAGED=1` to enable `queryMore` paging
+  - Processes tasks in batches to avoid memory issues
+  - Automatically fetches additional pages until all tasks are processed
+  - Ideal for backlogs of thousands of tasks
+- **SOQL with TYPEOF**: Single query with polymorphic `Who` (Contact/Lead) and `What` (Account) resolution
+
+### Glassix Authentication (Access Token Flow)
+AutoMessager supports **two authentication modes** for Glassix:
+
+#### **Modern: Access Token Flow (Recommended)**
+For enhanced security, use the access token exchange mechanism:
+- **Setup**: Provide both `GLASSIX_API_KEY` and `GLASSIX_API_SECRET` in your environment
+- **Flow**: 
+  1. On startup, exchange API Key + Secret for a temporary access token at `/access-token` endpoint
+  2. Access token is valid for ~3 hours
+  3. Token is cached and refreshed proactively before expiration
+- **Benefits**: Secrets never transmitted with API requests; short-lived tokens limit exposure
+
+#### **Legacy: Direct Bearer Token (Backward Compatible)**
+For backward compatibility, you can still use a direct API key:
+- **Setup**: Provide only `GLASSIX_API_KEY` (the legacy `GLASSIXAPIKEY` env var is still supported with a deprecation warning)
+- **Flow**: API key is sent directly as `Authorization: Bearer` header on every request
+- **Migration path**: When you add `GLASSIX_API_SECRET`, the system automatically switches to access token flow
+
+### API Modes
+Glassix supports two API modes via `GLASSIX_API_MODE`:
+- **`messages`** (default): Standard messaging API
+- **`protocols`**: Protocol-based messaging for advanced integrations
+
+### Security Features
+- **Secret redaction**: All sensitive fields (passwords, tokens, API keys) are automatically redacted from logs using Pino's redaction paths
+- **PII masking**: Phone numbers are masked in logs (e.g., `+972****5678`)
+- **Zod validation**: All environment variables are validated on startup
+- **No plaintext dumps**: Configuration is never logged wholesale; only whitelisted safe fields appear in logs
+
+### DRY_RUN Preview Mode
+- Set `DRY_RUN=1` to preview message sends without actually sending or updating Salesforce
+- Logs masked phone numbers, template keys, and message lengths
+- Perfect for testing template changes or validating task selection logic
+- Stats show `previewed` count instead of `sent`
+
+---
+
 ## Configuration
 
 1. Copy `.env.example` to `.env`:
@@ -35,19 +912,71 @@ cp .env.example .env
 ```
 
 2. Fill in your credentials in `.env`:
+
 ```env
+# Salesforce Configuration
 SF_LOGIN_URL=https://login.salesforce.com
 SF_USERNAME=your-salesforce-username@example.com
 SF_PASSWORD=your-salesforce-password
 SF_TOKEN=your-salesforce-security-token
 
+# Glassix Configuration (Modern: Access Token Flow)
 GLASSIX_BASE_URL=https://api.glassix.com
 GLASSIX_API_KEY=your-glassix-api-key
+GLASSIX_API_SECRET=your-glassix-api-secret
 
+# Legacy (temporary compatibility - use modern flow above instead):
+# GLASSIXAPIKEY=your-legacy-api-key
+
+# Glassix API Settings
+GLASSIX_API_MODE=messages
+GLASSIX_TIMEOUT_MS=15000
+
+# Salesforce Query Settings
 TASKS_QUERY_LIMIT=200
+TASK_CUSTOM_PHONE_FIELD=Phone__c
+
+# Excel Mapping Configuration
+XSLX_MAPPING_PATH=./massege_maping.xlsx
+# XSLX_SHEET=0  # Optional: sheet name or index
+
+# Application Behavior
+KEEP_READY_ON_FAIL=true
+PERMIT_LANDLINES=false
 DEFAULT_LANG=he
+
+# Retry Configuration
+RETRY_ATTEMPTS=3
+RETRY_BASE_MS=300
+
+# Logging
 LOG_LEVEL=info
 ```
+
+**Configuration Reference:**
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SF_LOGIN_URL` | ✅ | - | Salesforce login URL (prod: `https://login.salesforce.com`, sandbox: `https://test.salesforce.com`) |
+| `SF_USERNAME` | ✅ | - | Your Salesforce username (email) |
+| `SF_PASSWORD` | ✅ | - | Your Salesforce password |
+| `SF_TOKEN` | ✅ | - | Salesforce security token |
+| `GLASSIX_BASE_URL` | ✅ | - | Glassix API base URL |
+| `GLASSIX_API_KEY` | ✅* | - | Glassix API key (for direct auth or token exchange) |
+| `GLASSIX_API_SECRET` | ⚠️ | - | Glassix API secret (enables access token flow) |
+| `GLASSIX_API_MODE` | ❌ | `messages` | API mode: `messages` or `protocols` |
+| `GLASSIX_TIMEOUT_MS` | ❌ | `15000` | API request timeout in milliseconds |
+| `TASKS_QUERY_LIMIT` | ❌ | `200` | Max tasks to fetch per query |
+| `TASK_CUSTOM_PHONE_FIELD` | ❌ | `Phone__c` | Custom phone field name on Task |
+| `XSLX_MAPPING_PATH` | ❌ | `./massege_maping.xlsx` | Path to Excel mapping file |
+| `XSLX_SHEET` | ❌ | - | Sheet name or index (0-based) |
+| `KEEP_READY_ON_FAIL` | ❌ | `true` | Keep `Ready_for_Automation__c=true` on failure |
+| `PERMIT_LANDLINES` | ❌ | `false` | Allow non-mobile phone numbers |
+| `RETRY_ATTEMPTS` | ❌ | `3` | Number of retry attempts on failure |
+| `RETRY_BASE_MS` | ❌ | `300` | Base retry delay in milliseconds (exponential backoff) |
+| `LOG_LEVEL` | ❌ | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
+
+\* Either `GLASSIX_API_KEY` alone (legacy) or `GLASSIX_API_KEY` + `GLASSIX_API_SECRET` (access token flow) required
 
 ### Excel Template File Path
 
@@ -192,6 +1121,23 @@ The Excel file should have the following columns:
 | reminder | שלום {{name}}, תזכורת לתאריך {{date}} | Hello {{name}}, reminder for {{date}} | name,date |
 
 Variables can use either `{{var}}` or `{var}` syntax.
+
+---
+
+## 📚 Documentation
+
+**Quick Navigation:**
+
+- **[docs/README.md](docs/README.md)** - Documentation index (start here)
+- **[docs/README-QUICKSTART.md](docs/README-QUICKSTART.md)** - 5-minute setup guide
+- **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Top 10 issues and solutions
+- **[SETUP.md](SETUP.md)** - Detailed configuration guide
+- **[RELEASE_NOTES_v1.0.0.md](RELEASE_NOTES_v1.0.0.md)** - What's new in v1.0.0
+- **[docs/MACOS_SIGNING_NOTES.md](docs/MACOS_SIGNING_NOTES.md)** - macOS security guide
+- **[docs/SECURITY_HARDENING.md](docs/SECURITY_HARDENING.md)** - Security features
+- **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** - Technical deep-dive & history
+
+---
 
 ## License
 

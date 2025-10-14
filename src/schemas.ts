@@ -5,12 +5,16 @@
 import { z } from 'zod';
 
 /**
- * Glassix API response schema for message sending
+ * Glassix API response schema for message sending (lenient, multi-shape)
+ * Accepts various field names across different API versions
  */
 export const GlassixSendResponseSchema = z.object({
   id: z.string().optional(),
   messageId: z.string().optional(),
+  providerId: z.string().optional(),
+  sid: z.string().optional(),
   conversationUrl: z.string().url().optional(),
+  conversation_link: z.string().url().optional(),
   conversation: z
     .object({
       id: z.string().optional(),
@@ -19,9 +23,45 @@ export const GlassixSendResponseSchema = z.object({
     .optional(),
   status: z.string().optional(),
   error: z.string().optional(),
-});
+}).passthrough(); // Allow additional fields
 
 export type GlassixSendResponse = z.infer<typeof GlassixSendResponseSchema>;
+
+/**
+ * Parse Glassix send response with lenient field matching
+ * Handles multiple response formats from different API versions
+ */
+export function parseGlassixSendResponse(resp: unknown): {
+  providerId?: string;
+  conversationUrl?: string;
+} {
+  const parsed = GlassixSendResponseSchema.safeParse(resp);
+  
+  if (!parsed.success) {
+    // Return empty object if parsing fails (non-critical)
+    return {};
+  }
+
+  const data = parsed.data;
+
+  // Extract providerId from multiple possible fields
+  const providerId =
+    data.providerId ||
+    data.id ||
+    data.messageId ||
+    data.conversation?.id ||
+    data.sid ||
+    undefined;
+
+  // Extract conversationUrl from multiple possible fields
+  const conversationUrl =
+    data.conversationUrl ||
+    data.conversation?.url ||
+    data.conversation_link ||
+    undefined;
+
+  return { providerId, conversationUrl };
+}
 
 /**
  * Salesforce Task query response schema

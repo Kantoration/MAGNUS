@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Export project source code to a single text file for external code review
- * Usage: tsx export_repo_to_txt.ts [--src-only] [--with-tests]
+ * Usage: tsx export_repo_to_txt.ts [--src-only] [--with-tests] [--with-scripts]
  */
 
 import { promises as fs } from 'fs';
@@ -12,8 +12,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Configuration
-const OUTPUT_FILE = 'project_export.txt';
-const REPO_ROOT = __dirname;
+const OUTPUT_FILE = path.join('logs', 'Project Source Code Export.txt');
+const REPO_ROOT = path.join(__dirname, '..');
 
 // Directories to skip
 const SKIP_DIRS = new Set([
@@ -41,6 +41,8 @@ const INCLUDE_EXTENSIONS = new Set([
   '.yaml',
   '.config.js',
   '.config.ts',
+  '.ps1',
+  '.sh',
 ]);
 
 // Special files to include
@@ -60,6 +62,7 @@ const INCLUDE_FILES = new Set([
 const args = process.argv.slice(2);
 const srcOnly = args.includes('--src-only');
 const withTests = args.includes('--with-tests');
+const withScripts = args.includes('--with-scripts');
 
 // Determine which folders to export
 let TARGET_FOLDERS: string[] = [];
@@ -67,9 +70,11 @@ if (srcOnly) {
   TARGET_FOLDERS = ['src'];
 } else if (withTests) {
   TARGET_FOLDERS = ['src', 'test'];
+} else if (withScripts) {
+  TARGET_FOLDERS = ['src', 'test', 'bin', 'scripts'];
 } else {
-  // Default: both src and test
-  TARGET_FOLDERS = ['src', 'test'];
+  // Default: src, test, bin, and scripts
+  TARGET_FOLDERS = ['src', 'test', 'bin', 'scripts'];
 }
 
 interface FileInfo {
@@ -153,11 +158,15 @@ async function collectFiles(): Promise<FileInfo[]> {
   // Add root-level config files
   const rootFiles = [
     'package.json',
-    'package-lock.json',
     'tsconfig.json',
     'vitest.config.ts',
     '.env.example',
     'README.md',
+    'SETUP.md',
+    'DELIVERABLES.md',
+    'CLI_IMPLEMENTATION_SUMMARY.md',
+    'MVP_POLISH_SUMMARY.md',
+    'FINAL_MVP_POLISH_REPORT.md',
   ];
 
   for (const fileName of rootFiles) {
@@ -191,6 +200,38 @@ async function collectFiles(): Promise<FileInfo[]> {
 }
 
 /**
+ * Redact secrets from content
+ * Masks sensitive values like API keys, passwords, tokens
+ */
+function redactSecrets(content: string): string {
+  let redacted = content;
+
+  // Redact common secret patterns
+  const patterns = [
+    // API keys and secrets
+    /(GLASSIX_API_KEY\s*[=:]\s*['"]?)([^'"\s\n]{10,})(['"]?)/gi,
+    /(GLASSIX_API_SECRET\s*[=:]\s*['"]?)([^'"\s\n]{10,})(['"]?)/gi,
+    /(SF_PASSWORD\s*[=:]\s*['"]?)([^'"\s\n]{6,})(['"]?)/gi,
+    /(SF_TOKEN\s*[=:]\s*['"]?)([^'"\s\n]{6,})(['"]?)/gi,
+    
+    // Bearer tokens in headers
+    /(Bearer\s+)([A-Za-z0-9._-]{20,})/g,
+    
+    // Authorization headers
+    /(authorization["']?\s*:\s*["'])([^"']{10,})(["'])/gi,
+  ];
+
+  for (const pattern of patterns) {
+    redacted = redacted.replace(pattern, (match, prefix, secret, suffix = '') => {
+      const masked = secret.length > 4 ? '****' + secret.slice(-4) : '****';
+      return prefix + masked + suffix;
+    });
+  }
+
+  return redacted;
+}
+
+/**
  * Export a single file to the output
  */
 async function exportFile(
@@ -198,18 +239,28 @@ async function exportFile(
   outputStream: fs.FileHandle
 ): Promise<number> {
   try {
-    const content = await fs.readFile(file.absolutePath, 'utf-8');
+    let content = await fs.readFile(file.absolutePath, 'utf-8');
+    
+    // Redact secrets unless it's a test file or documentation
+    const isTestOrDoc = file.relativePath.includes('test/') || 
+                        file.relativePath.endsWith('.md') ||
+                        file.relativePath.includes('docs/');
+    
+    if (!isTestOrDoc) {
+      content = redactSecrets(content);
+    }
+    
     const lines = content.split('\n').length;
 
     // Write file header
     const header = `\n===== FILE: ${file.relativePath} =====\n`;
-    await outputStream.write(header, 'utf-8');
+    await outputStream.write(header);
 
     // Write file content
-    await outputStream.write(content, 'utf-8');
+    await outputStream.write(content);
 
     // Add blank line separator
-    await outputStream.write('\n\n', 'utf-8');
+    await outputStream.write('\n\n');
 
     console.log(`✓ ${file.relativePath} (${lines} lines)`);
 
@@ -247,6 +298,14 @@ async function exportRepo(): Promise<void> {
     return;
   }
 
+  // Ensure logs directory exists
+  const logsDir = path.join(REPO_ROOT, 'logs');
+  try {
+    await fs.mkdir(logsDir, { recursive: true });
+  } catch {
+    // Ignore if exists
+  }
+
   // Create/truncate output file
   const outputPath = path.join(REPO_ROOT, OUTPUT_FILE);
   const outputStream = await fs.open(outputPath, 'w');
@@ -254,13 +313,23 @@ async function exportRepo(): Promise<void> {
   try {
     // Write header
     const timestamp = new Date().toISOString();
-    const header = `Project Source Code Export
+    const header = `AutoMessager - Project Source Code Export
+===============================================
+
 Generated: ${timestamp}
-Folders: ${TARGET_FOLDERS.join(', ')}
-Total files: ${files.length}
+Repository: AutoMessager v1.0.0
+Folders Included: ${TARGET_FOLDERS.join(', ')}
+Total Files: ${files.length}
+
+SECURITY NOTICE:
+- All API keys, passwords, and tokens have been redacted
+- Secrets shown as: ****XXXX (last 4 chars only)
+- Safe for external code review
+
+===============================================
 
 `;
-    await outputStream.write(header, 'utf-8');
+    await outputStream.write(header);
 
     // Export each file
     let totalLines = 0;
@@ -271,7 +340,7 @@ Total files: ${files.length}
 
     // Write footer
     const footer = `\n===== END OF EXPORT =====\n`;
-    await outputStream.write(footer, 'utf-8');
+    await outputStream.write(footer);
 
     console.log('');
     console.log('✅ Export complete!');
