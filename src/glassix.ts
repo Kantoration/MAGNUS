@@ -1,6 +1,22 @@
 /**
  * Glassix API client with access-token caching, dual-mode support, and hardened security
- * Supports both 'messages' mode and 'protocols' mode for WhatsApp sends
+ * 
+ * AUTHENTICATION:
+ * - Preferred: Modern access token flow (USE_ACCESS_TOKEN_FLOW=true)
+ *   - Requires GLASSIX_API_KEY + GLASSIX_API_SECRET
+ *   - Exchanges credentials for short-lived access token
+ *   - Caches token until expiry (minus 60s safety margin)
+ *   - More secure than legacy bearer mode
+ * 
+ * - Fallback: Legacy bearer mode (USE_ACCESS_TOKEN_FLOW=false)
+ *   - Uses GLASSIX_API_KEY directly in Authorization header
+ *   - Less secure (long-lived credential in every request)
+ *   - Only use if access token flow unavailable
+ *   - Must explicitly set ALLOW_LEGACY_BEARER=true in strict mode
+ * 
+ * MODES:
+ * - 'messages' mode: Direct message sending (simpler, default)
+ * - 'protocols' mode: Protocol-based sending (required for some Glassix setups)
  */
 import axios, { AxiosError } from 'axios';
 import Bottleneck from 'bottleneck';
@@ -105,10 +121,21 @@ export async function getAccessToken(): Promise<string> {
     
     // Additional scrubbing for access token endpoint to prevent secret leakage
     // This catches cases where buildSafeAxiosError might miss secrets in response bodies
-    const scrubbedMsg = safeMsg
+    const config = getConfig();
+    let scrubbedMsg = safeMsg
       .replace(/"apiKey"\s*:\s*"[^"]+"/g, '"apiKey":"[REDACTED]"')
       .replace(/"secret"\s*:\s*"[^"]+"/g, '"secret":"[REDACTED]"')
-      .replace(/(?:apiKey|secret)"\s*:\s*"[^"]+"/g, 'apiKey":"[REDACTED]"');
+      .replace(/"api_key"\s*:\s*"[^"]+"/gi, '"api_key":"[REDACTED]"')
+      .replace(/"api_secret"\s*:\s*"[^"]+"/gi, '"api_secret":"[REDACTED]"')
+      .replace(/(?:apiKey|secret|api_key|api_secret)"\s*:\s*"[^"]+"/gi, '"[CREDENTIAL]":"[REDACTED]"');
+    
+    // Paranoid: Replace any occurrence of the actual API key or secret (in case it leaked through)
+    if (config.GLASSIX_API_KEY) {
+      scrubbedMsg = scrubbedMsg.replace(new RegExp(config.GLASSIX_API_KEY, 'g'), '[REDACTED]');
+    }
+    if (config.GLASSIX_API_SECRET) {
+      scrubbedMsg = scrubbedMsg.replace(new RegExp(config.GLASSIX_API_SECRET, 'g'), '[REDACTED]');
+    }
     
     logger.error({ error: scrubbedMsg }, 'Failed to get access token');
     throw new Error(`Access token exchange failed: ${scrubbedMsg}`);
@@ -119,10 +146,18 @@ export async function getAccessToken(): Promise<string> {
  * Get bearer token for Authorization header
  * - If USE_ACCESS_TOKEN_FLOW: fetches/caches access token
  * - Else: returns legacy GLASSIX_API_KEY
+ * 
+ * SECURITY: Never log the return value of this function!
  */
 function getBearer(): string {
   const config = getConfig();
-  return config.GLASSIX_API_KEY!;
+  
+  // Return API key for legacy mode (never log this!)
+  if (!config.GLASSIX_API_KEY) {
+    throw new Error('GLASSIX_API_KEY is required but not configured');
+  }
+  
+  return config.GLASSIX_API_KEY;
 }
 
 /**

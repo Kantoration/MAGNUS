@@ -1,13 +1,39 @@
 /**
  * Environment configuration with Zod validation
- * Supports Glassix Access Token flow with backwards compatibility
- * Loads .env from binary directory or current working directory
+ * 
+ * FEATURES:
+ * - Supports Glassix Access Token flow with backwards compatibility
+ * - Loads .env from binary directory or current working directory  
+ * - Provides secure defaults (SAFE_MODE_STRICT=true)
+ * - Validates all configuration at startup
+ * - Redacts secrets in snapshots for support bundles
+ * 
+ * DEFAULTS (if not specified in .env):
+ * - GLASSIX_API_MODE: 'messages'
+ * - GLASSIX_TIMEOUT_MS: 15000 (15 seconds)
+ * - SAFE_MODE_STRICT: true
+ * - ALLOW_LEGACY_BEARER: false
+ * - RETRY_ATTEMPTS: 3
+ * - RETRY_BASE_MS: 300
+ * - TASKS_QUERY_LIMIT: 200
+ * - LOG_LEVEL: 'info'
+ * - DEFAULT_LANG: 'he'
+ * - DRY_RUN: false
+ * 
+ * See README.md for complete configuration reference.
  */
 import { z } from 'zod';
 import dotenv from 'dotenv';
 import path from 'path';
 
-// Determine .env path: prefer binary directory, fallback to cwd
+/**
+ * Determine .env file path
+ * 
+ * - For PKG binaries: uses executable directory (e.g., same folder as automessager.exe)
+ * - For source mode: uses current working directory
+ * 
+ * This ensures the binary can run independently without the source repository.
+ */
 const getBinaryDir = (): string => {
   // For PKG binaries, use executable directory
   // @ts-ignore - pkg adds this property at runtime
@@ -78,6 +104,22 @@ export let USE_ACCESS_TOKEN_FLOW = false;
 /**
  * Get validated configuration with legacy migration support
  */
+/**
+ * Get validated configuration
+ * 
+ * Loads and validates environment variables using Zod schema.
+ * Results are cached after first call for performance.
+ * 
+ * @returns Validated configuration object with all settings
+ * @throws ZodError if required variables are missing or invalid
+ * 
+ * @example
+ * ```typescript
+ * const config = getConfig();
+ * console.log(config.GLASSIX_API_MODE); // 'messages' or 'protocols'
+ * console.log(config.RETRY_ATTEMPTS); // 3 (default)
+ * ```
+ */
 export function getConfig(): Config {
   if (cachedConfig) {
     return cachedConfig;
@@ -146,6 +188,25 @@ export function clearConfigCache(): void {
  * Assert secure authentication is configured
  * Throws if SAFE_MODE_STRICT is enabled and legacy mode is used without explicit opt-in
  */
+/**
+ * Assert secure authentication is configured
+ * 
+ * In strict mode (SAFE_MODE_STRICT=true, default), enforces modern access token flow
+ * unless explicitly allowed to use legacy bearer mode.
+ * 
+ * Throws descriptive error with three resolution options:
+ * 1. Add GLASSIX_API_SECRET (recommended)
+ * 2. Set ALLOW_LEGACY_BEARER=true (not recommended)
+ * 3. Set SAFE_MODE_STRICT=false (not recommended for production)
+ * 
+ * @throws Error if secure authentication requirements not met
+ * 
+ * @example
+ * ```typescript
+ * // At app startup:
+ * assertSecureAuth(); // Throws if not configured securely
+ * ```
+ */
 export function assertSecureAuth(): void {
   const config = getConfig();
 
@@ -167,6 +228,24 @@ export function assertSecureAuth(): void {
 /**
  * Get redacted environment snapshot for diagnostics
  * All secrets are masked, showing only last 4 characters
+ */
+/**
+ * Get redacted environment snapshot for support bundles
+ * 
+ * Returns all configuration with secrets masked for safe sharing.
+ * Secrets show only last 4 characters (e.g., "****ABCD").
+ * 
+ * Safe to include in support bundles and diagnostic exports.
+ * 
+ * @returns Record of environment variables with secrets masked
+ * 
+ * @example
+ * ```typescript
+ * const snapshot = getRedactedEnvSnapshot();
+ * console.log(snapshot.SF_PASSWORD); // "****WXYZ"
+ * console.log(snapshot.GLASSIX_API_KEY); // "****1234"
+ * console.log(snapshot.LOG_LEVEL); // "info" (not a secret)
+ * ```
  */
 export function getRedactedEnvSnapshot(): Record<string, string> {
   const config = getConfig();

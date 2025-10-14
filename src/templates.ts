@@ -10,6 +10,7 @@ import { fileURLToPath } from 'url';
 import { getConfig } from './config.js';
 import { getLogger } from './logger.js';
 import { todayIso, todayHe } from './utils/date.js';
+import { sanitizeTemplateText, validatePlaceholders, sanitizeLink } from './templates.sanitize.js';
 import type { Logger } from 'pino';
 import type { RawMappingRow, NormalizedMapping, RenderContext } from './types.js';
 
@@ -569,7 +570,8 @@ export function renderMessage(
     return { text: '' };
   }
 
-  let text = mapping.messageBody;
+  // Sanitize template text (remove control characters, enforce length limits)
+  let text = sanitizeTemplateText(mapping.messageBody);
 
   // Always inject today's date if not provided
   const dateIso = ctx.date_iso || todayIso();
@@ -593,6 +595,9 @@ export function renderMessage(
       fullContext[key] = String(value ?? '');
     }
   }
+
+  // Validate all placeholders against whitelist (prevents template injection)
+  validatePlaceholders(fullContext);
 
   // Replace all variables (both {{var}} and {var} syntax)
   for (const [key, value] of Object.entries(fullContext)) {
@@ -623,7 +628,9 @@ export function renderMessage(
   // If link exists but no placeholder, append at end
   const linkToUse = ctx.link || mapping.link;
   if (linkToUse && !hasLinkPlaceholder) {
-    text += `\n${linkToUse}`;
+    // Sanitize link before appending (validates HTTP/HTTPS only)
+    const sanitizedLink = sanitizeLink(linkToUse);
+    text += `\n${sanitizedLink}`;
   }
 
   // Return result

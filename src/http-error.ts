@@ -52,17 +52,32 @@ export function buildSafeAxiosError(err: unknown): string {
   // Compose status + message
   let composed = `${status ?? 'ERR'} ${statusText} ${msg}`.trim();
 
-  // Redact authorization headers (case-insensitive)
-  composed = composed.replace(
-    /authorization"?\s*:\s*"[^"]+"/gi,
-    'authorization:"[REDACTED]"'
-  );
+  // Redact authorization headers (case-insensitive, multiple patterns)
+  composed = composed
+    .replace(/authorization"?\s*:\s*"[^"]+"/gi, 'authorization:"[REDACTED]"')
+    .replace(/authorization"?\s*:\s*'[^']+'/gi, "authorization:'[REDACTED]'")
+    .replace(/Authorization:\s*Bearer\s+[A-Za-z0-9._-]+/gi, 'Authorization: Bearer [REDACTED]');
 
-  // Redact bearer tokens
-  composed = composed.replace(
-    /Bearer\s+[A-Za-z0-9._-]+/g,
-    'Bearer [REDACTED]'
-  );
+  // Redact bearer tokens (multiple patterns)
+  composed = composed
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED]')
+    .replace(/"token"\s*:\s*"[^"]+"/gi, '"token":"[REDACTED]"')
+    .replace(/"accessToken"\s*:\s*"[^"]+"/gi, '"accessToken":"[REDACTED]"')
+    .replace(/"access_token"\s*:\s*"[^"]+"/gi, '"access_token":"[REDACTED]"')
+    .replace(/access_token"\s*:\s*"[^"]+"/gi, 'access_token":"[REDACTED]"'); // Without leading quote
+  
+  // Redact API keys and secrets (paranoid mode - multiple formats)
+  composed = composed
+    // JSON format with quotes: "apiKey": "value"
+    .replace(/"(?:api_?key|api_?secret|apiKey|apiSecret)"\s*:\s*"[^"]+"/gi, '"[CREDENTIAL]":"[REDACTED]"')
+    // Without quotes around key: apiKey: "value"
+    .replace(/(?:api_?key|api_?secret|apiKey|apiSecret)\s*:\s*"[^"]+"/gi, '[CREDENTIAL]:"[REDACTED]"')
+    // Object format: apiKey="value"
+    .replace(/(?:api_?key|api_?secret|apiKey|apiSecret)\s*=\s*"[^"]+"/gi, '[CREDENTIAL]="[REDACTED]"')
+    // Query string: api_key=value
+    .replace(/(?:api_?key|api_?secret|apiKey|apiSecret)=[\w.-]+/gi, '[CREDENTIAL]=[REDACTED]')
+    // Uppercase variations: API_KEY="value"
+    .replace(/(?:API_?KEY|API_?SECRET)\s*=\s*"[^"]+"/gi, '[CREDENTIAL]="[REDACTED]"');
 
   // Truncate if too long
   if (composed.length > MAX_ERROR_LENGTH) {

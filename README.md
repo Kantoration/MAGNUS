@@ -6,17 +6,86 @@
 
 ## 🎯 What Does This System Do?
 
-AutoMessager is an intelligent automation system that:
+AutoMessager is an intelligent automation system that connects your Salesforce tasks with WhatsApp messaging, making customer communication automatic, consistent, and scalable.
 
-1. **Monitors your Salesforce** for tasks that need customer communication
-2. **Retrieves customer information** (name, phone, account) from your CRM
-3. **Selects the right message template** from your Excel library
-4. **Personalizes each message** with customer-specific details
-5. **Sends WhatsApp messages** through Glassix platform
-6. **Updates Salesforce** with delivery status and conversation links
-7. **Handles errors gracefully** and retries when needed
+### For Non-Technical Users: How It Works
 
-**In simple terms**: It automates sending the right WhatsApp message to the right customer at the right time, based on your Salesforce workflow.
+Think of AutoMessager as a smart assistant that:
+
+1. **Reads your to-do list** (Salesforce tasks marked for automation)
+2. **Checks customer details** (pulls name, phone number, account from Salesforce)
+3. **Chooses the right message** (looks up the template in your Excel file)
+4. **Fills in the blanks** (replaces placeholders like `{{first_name}}` with actual customer names)
+5. **Sends the message** (via WhatsApp through Glassix)
+6. **Records what happened** (updates Salesforce with delivery status and conversation link)
+7. **Handles problems automatically** (retries failed messages, logs errors for review)
+
+**Real-world example:**
+
+```
+Salesforce Task:          Excel Template:                      Final Message:
+─────────────────         ──────────────────────────           ─────────────────────
+Type: NEW_PHONE          "שלום {{first_name}}!                "שלום דניאל!
+Customer: Daniel Cohen    חברת MAGNUS מודיעה כי                חברת MAGNUS מודיעה כי
+Phone: +972501234567      המכשיר {{device_model}}              המכשיר S24 Galaxy
+Device: S24 Galaxy        מוכן לאיסוף."                         מוכן לאיסוף."
+                          ↓ BECOMES ↓                          (Sent to +972***4567)
+```
+
+### What It Does NOT Do
+
+❌ **Does not send spam** - Only processes tasks you mark as "Ready for Automation"  
+❌ **Does not guess** - If template or phone missing, it skips safely and logs why  
+❌ **Does not leak data** - All phone numbers masked in logs, secrets never exposed  
+❌ **Does not send duplicates** - Uses idempotency keys to prevent double-sending  
+
+### The Complete Workflow (Step-by-Step)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. FETCH TASKS                                              │
+│    • Connects to Salesforce                                 │
+│    • Finds tasks with "Ready_for_Automation__c = true"      │
+│    • Pulls up to 200 tasks per batch (configurable)         │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 2. LOAD TEMPLATES                                           │
+│    • Opens your Excel file (massege_maping.xlsx)            │
+│    • Reads Hebrew column headers                            │
+│    • Validates templates have required placeholders         │
+│    • Caches in memory for speed                             │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 3. PROCESS EACH TASK (in parallel, max 5 at once)           │
+│    For each task:                                           │
+│    a) Find the right template (matches TaskType field)      │
+│    b) Get customer phone (from Contact or Account)          │
+│    c) Validate phone is Israeli (+972) mobile number        │
+│    d) Render message (fill in {{first_name}}, {{date}})     │
+│    e) Send via WhatsApp                                     │
+│    f) Update Salesforce with status                         │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 4. HANDLE RESULTS                                           │
+│    • SUCCESS: Mark task complete, save conversation URL     │
+│    • FAILURE: Log error, mark failed with reason            │
+│    • SKIP: No template/phone, log why and continue          │
+│    • All outcomes logged for audit trail                    │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 5. REPORT & CLEANUP                                         │
+│    • Print summary (Sent: X, Failed: Y, Skipped: Z)         │
+│    • Write metrics (if configured)                          │
+│    • Close connections gracefully                           │
+│    • Repeat for next page if more tasks exist               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**In simple terms**: AutoMessager automates sending the right WhatsApp message to the right customer at the right time, based on your Salesforce workflow—safely, reliably, and at scale.
 
 ---
 
@@ -1007,6 +1076,286 @@ XSLX_MAPPING_PATH=./templates/massege_maping.xlsx
 ```
 
 **Important:** On Windows, backslashes in paths must be escaped (`\\`) or use forward slashes (`/`).
+
+## 🏗️ Architecture & Technical Details
+
+### For Developers: Big-Picture Pipeline
+
+**What talks to what:**
+
+```
+┌──────────────────┐
+│   CLI Entry      │  bin/automessager.ts
+│   Points         │  ├── run (main loop)
+└────────┬─────────┘  ├── init/wizard (setup)
+         │            ├── doctor (diagnostics)
+         ↓            └── verify:mapping (validation)
+┌──────────────────────────────────────────────────────────┐
+│                   CORE SERVICES                          │
+├──────────────────────────────────────────────────────────┤
+│ • Config (src/config.ts)                                 │
+│   └─ Load/validate .env, enforce secure auth policy     │
+│                                                          │
+│ • Logger (src/logger.ts)                                 │
+│   └─ Structured logs, PII redaction, correlation IDs    │
+│                                                          │
+│ • Salesforce (src/sf.ts)                                 │
+│   └─ Login, SOQL fetch/update, field mapping            │
+│                                                          │
+│ • Glassix (src/glassix.ts)                               │
+│   └─ Access token exchange, message send, rate limiting │
+│                                                          │
+│ • Templates (src/templates.ts)                           │
+│   └─ Load/parse Excel, validate placeholders, render    │
+│                                                          │
+│ • Phone (src/phone.ts)                                   │
+│   └─ Normalize E.164, mask PII, validate Israeli        │
+│                                                          │
+│ • HTTP Error Utils (src/http-error.ts)                   │
+│   └─ Safe error strings, retry logic, backoff           │
+│                                                          │
+│ • SF Updater (src/sf-updater.ts)                         │
+│   └─ Update Task fields, audit trail policy             │
+│                                                          │
+│ • Metrics (src/metrics.ts) [optional]                    │
+│   └─ Prometheus counters/histograms, telemetry          │
+└──────────────────────────────────────────────────────────┘
+         ↓
+┌──────────────────────────────────────────────────────────┐
+│              ORCHESTRATOR (src/run.ts)                   │
+│  Wires everything together:                              │
+│  1. Load config & assert auth policy                     │
+│  2. Connect to Salesforce                                │
+│  3. Load/validate template map                           │
+│  4. Pull page of Tasks (up to 200)                       │
+│  5. Process Tasks in parallel (max 5, rate-limited)      │
+│  6. Write updates & stats/metrics                        │
+│  7. Repeat for next page (if paging enabled)             │
+└──────────────────────────────────────────────────────────┘
+```
+
+### Data Flow for a Single Task
+
+Here's what happens when processing one Salesforce task:
+
+```
+1. FETCH TASK
+   ├─ Query: "SELECT Id, TaskType__c, ... FROM Task WHERE Ready_for_Automation__c = true"
+   ├─ Includes: Related Contact/Account fields (phone, name)
+   └─ Result: Task object with all needed data
+              ↓
+2. NORMALIZE PHONE
+   ├─ Extract from Contact.Phone or Account.Phone
+   ├─ Clean: Remove spaces, hyphens, parentheses
+   ├─ Validate: Must be +972 (Israeli), mobile prefix (50/52/53/54/55/58)
+   └─ Result: "+972501234567" (E.164 format) or NULL
+              ↓
+3. DERIVE CONTEXT
+   ├─ Task Type → Template key (e.g., "NEW_PHONE")
+   ├─ Contact fields → Placeholders (first_name, account_name)
+   ├─ System → Inject date ({{date}}, {{date_he}}, {{date_iso}})
+   └─ Result: { first_name: "Daniel", date: "14/10/2025", device_model: "S24" }
+              ↓
+4. RENDER MESSAGE
+   ├─ Lookup template by TaskType__c
+   ├─ Replace placeholders: "{{first_name}}" → "Daniel"
+   ├─ Sanitize: Remove control chars, validate links
+   ├─ Append date/link if not in template
+   └─ Result: "שלום Daniel! המכשיר S24 מוכן לאיסוף. (תאריך: 14/10/2025)"
+              ↓
+5. SEND VIA GLASSIX
+   ├─ Ensure access token (or legacy bearer if allowed)
+   ├─ Throttle with Bottleneck (max 4 req/sec)
+   ├─ Include Idempotency-Key = Task.Id (prevent duplicates)
+   ├─ POST to /v2/messages or /v3/protocols
+   └─ Result: { providerId: "abc123", conversationUrl: "https://..." }
+              ↓
+6. UPDATE SALESFORCE
+   ├─ If SUCCESS:
+   │  ├─ Set Delivery_Status__c = "Sent"
+   │  ├─ Set Last_Sent_At__c = now
+   │  ├─ Set Glassix_Conversation_URL__c = conversationUrl
+   │  ├─ Set Glassix_Provider_ID__c = providerId
+   │  └─ Append to Audit_Trail__c (with smart truncation)
+   ├─ If FAILURE:
+   │  ├─ Set Delivery_Status__c = "Failed"
+   │  └─ Set Failure_Reason__c = error message
+   └─ Retry logic: 3 attempts with exponential backoff
+              ↓
+7. RECORD METRICS
+   ├─ Increment stats.sent or stats.failed
+   ├─ Track latency histogram (how long send took)
+   ├─ Log correlation ID (rid) for traceability
+   └─ Emit Prometheus metrics (if METRICS_PATH set)
+```
+
+### How Scripts Integrate
+
+The **CLI** (`bin/automessager.ts`) is the entry point:
+
+```typescript
+// CLI calls orchestrator
+import { runOnce } from './src/run.js';
+
+if (command === 'run') {
+  const stats = await runOnce();
+  console.log(`Sent: ${stats.sent}, Failed: ${stats.failed}`);
+}
+```
+
+The **Orchestrator** (`src/run.ts`) constructs all clients:
+
+```typescript
+// Initialize services
+const conn = await sf.login(config);
+const templateMap = await loadTemplateMap(config.XSLX_MAPPING_PATH);
+const updater = new SalesforceTaskUpdater(conn, fieldMap, config);
+
+// Process tasks
+for each page of tasks:
+  await pMap(tasks, async (task) => {
+    await processTask(conn, task, templateMap, config, stats, isDryRun, updater);
+  }, { concurrency: 5 });
+```
+
+**All stateful work** is encapsulated in service modules:
+- **Glassix client** holds token cache and rate limiter
+- **TemplateManager** caches Excel data (keyed by mtime)
+- **SalesforceTaskUpdater** centralizes field mapping and retry logic
+- **Orchestrator** just passes what's needed (Connection, config, stats)
+
+### Concurrency Model: Controlled Parallelism
+
+**Q: Does it "work in sync"?**  
+**A: It's asynchronous with controlled concurrency + rate limiting.**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Page of 200 Tasks                                      │
+├─────────────────────────────────────────────────────────┤
+│  Process 5 tasks at once (configurable via p-map)       │
+│                                                         │
+│  Task 1 ──┐                                             │
+│  Task 2 ──┼─→ [ Bottleneck Rate Limiter ]              │
+│  Task 3 ──┤      ↓                                      │
+│  Task 4 ──┤   Max 4 req/sec to Glassix                  │
+│  Task 5 ──┘      ↓                                      │
+│           ─→  [ Glassix API ]                            │
+│                                                         │
+│  Even if 5 tasks run concurrently, actual API calls     │
+│  won't exceed rate limit (250ms between calls)          │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Key mechanisms:**
+
+1. **p-map** - Process N tasks concurrently (default: 5)
+2. **Bottleneck** - Global rate limiter for Glassix (250ms = 4 req/sec)
+3. **Exponential backoff** - Retry with jitter (100ms, 200ms, 400ms...)
+4. **Worker offloading** - Large Excel files parsed in separate thread
+5. **Per-task isolation** - Failures caught and logged, don't stop others
+
+**Why this model?**
+
+- ✅ **Throughput** - Process many tasks quickly (5 at once)
+- ✅ **Safety** - Never exceed API rate limits (Bottleneck)
+- ✅ **Reliability** - Retries smooth over transient failures
+- ✅ **Responsiveness** - Worker threads keep event loop free
+- ✅ **Isolation** - One task failure doesn't crash the batch
+
+### Consistency & Ordering Guarantees
+
+**At-least-once delivery** with idempotency:
+
+```
+Glassix Idempotency-Key = Task.Id
+
+First send:  POST /messages { "idemKey": "00T1x000001", ... }
+           → Creates conversation "conv_abc123"
+           
+Retry send:  POST /messages { "idemKey": "00T1x000001", ... }
+           → Returns SAME conversation "conv_abc123" (no duplicate)
+```
+
+**Salesforce is source of truth** after send:
+
+- `Delivery_Status__c` = "Sent" | "Failed"
+- `Glassix_Conversation_URL__c` = Link to conversation
+- `Glassix_Provider_ID__c` = Glassix's internal ID
+- `Last_Sent_At__c` = Timestamp of last attempt
+- `Audit_Trail__c` = History of all attempts
+
+**Correlation IDs** for traceability:
+
+```
+Every log line includes:
+  rid: "abc123"  (request ID, unique per task)
+  taskId: "00T1x000001"
+  taskKey: "NEW_PHONE"
+  
+Search logs: grep "rid:abc123" → see entire task journey
+```
+
+**Rate-limit telemetry** maintains consistency:
+
+```
+Response headers:
+  x-ratelimit-remaining: 95
+  x-ratelimit-reset: 1697234567
+
+If remaining < 10 → warn and slow down
+If hit limit (429) → backoff and retry
+```
+
+### Where Desynchronization Could Happen (and How We Mitigate)
+
+**Problem: Template cache staleness**
+- User edits Excel while system running
+- **Mitigation:**
+  - Cache keyed by file `mtime` (modification time)
+  - Automatic reload when file changes detected
+  - Run `automessager verify:mapping` before production runs
+
+**Problem: Token expiry during bursts**
+- Access token expires mid-batch (3-hour lifetime)
+- **Mitigation:**
+  - Client auto-refreshes tokens (60s before expiry)
+  - Token fetch wrapped in retry logic
+  - Rate limiter reduces pressure on refresh endpoint
+
+**Problem: Partial failures (send success, SF update fails)**
+- WhatsApp sent but Salesforce update throws error
+- **Mitigation:**
+  - Updater errors are **non-fatal** (logged, not thrown)
+  - Idempotency prevents duplicate sends on retry
+  - Conversation URL presence indicates send succeeded
+  - Reconciliation job can fix SF state later
+
+**Problem: Phone number enumeration**
+- Error messages reveal if phone exists/invalid
+- **Mitigation:**
+  - User-facing errors are **generic** ("Unable to process")
+  - Specific reasons only in logs (with masked phone)
+  - No differentiation between missing/invalid/wrong format
+
+### TL;DR - Is It Synchronized?
+
+**Yes, operationally:**
+- The workflow is **well-coordinated and consistent** under concurrency
+- **Single orchestrator** governs fetch → process → update flow
+- **Bounded parallelism** for tasks (configurable)
+- **Global rate limiting** for external APIs (Bottleneck)
+- **Idempotent sends** (Idempotency-Key) prevent duplicates
+- **Centralized updates** (SalesforceTaskUpdater) keep SF in sync
+- **Comprehensive logging** (correlation IDs) for observability
+- **Optional metrics** (Prometheus) for monitoring
+
+**Intentionally asynchronous:**
+- For **throughput** (process 200 tasks/minute vs 1 task/minute)
+- With **safety** (rate limits, retries, isolation)
+- And **consistency** (idempotency, audit trails, correlation)
+
+---
 
 ## Usage
 
