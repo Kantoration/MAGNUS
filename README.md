@@ -131,6 +131,227 @@ https://magnus.co.il/devices
 - ✅ **Hebrew Text Processing**: Normalizes niqqud and RTL punctuation for stable matching
 - ✅ **Error Recovery**: Graceful degradation with comprehensive logging
 
+## 👥 **Non-Technical User Guide: Salesforce Setup & Usage**
+
+### **Understanding the "Ready for Automation" Checkbox**
+
+AutoMessager uses a simple checkbox in Salesforce called `Ready_for_Automation__c` to know which tasks should be processed automatically. Think of it as a **"Send WhatsApp Message" button** - when checked, it tells the system "This task is ready to be automated."
+
+### **🔧 Salesforce Setup (One-Time Configuration)**
+
+Your Salesforce administrator needs to create this custom field:
+
+#### **Step 1: Create the Custom Field**
+1. **Go to Setup** → **Object Manager** → **Task**
+2. **Create Custom Field**:
+   - **Field Type**: Checkbox
+   - **Field Name**: `Ready_for_Automation__c`
+   - **Field Label**: "📱 Send WhatsApp Message"
+   - **Default Value**: Unchecked
+   - **Help Text**: "Check this box to automatically send WhatsApp message for this task"
+
+#### **Alternative Setup Options**
+If you prefer not to create a new field, you can configure AutoMessager to use existing fields:
+
+**Option A: Use Task Status**
+```
+Task Status Values:
+- "Not Started" (default)
+- "Ready for Automation" ← AutoMessager processes these
+- "Completed"
+- "Cancelled"
+```
+
+**Option B: Use Task Type**
+```
+Task Type Values:
+- "Call"
+- "Email" 
+- "WhatsApp Message" ← AutoMessager processes these
+- "Meeting"
+```
+
+### **📱 Daily Usage: Simple 3-Step Process**
+
+#### **Step 1: Create a Task**
+1. Go to any **Contact** or **Lead** record
+2. Click **"New Task"** (or **"Log a Call"**)
+3. Fill in basic details:
+   - **Subject**: "Send welcome message to customer"
+   - **Type**: "WhatsApp Message" (optional)
+   - **Due Date**: Today or tomorrow
+
+#### **Step 2: Mark for Automation**
+1. **Check the box** next to **"📱 Send WhatsApp Message"** ✅
+2. **Save the Task**
+
+#### **Step 3: Done!**
+The AutoMessager system will automatically:
+- ✅ Find this task
+- ✅ Send the WhatsApp message using the correct template
+- ✅ Mark the task as completed
+- ✅ Update the task with delivery details and conversation link
+
+### **🎯 Real-World Examples**
+
+#### **Example 1: Customer's Phone is Ready for Pickup**
+
+**What you do:**
+1. **Open Salesforce** → Go to customer's contact record
+2. **Click "New Task"**
+3. **Fill out:**
+   - Subject: "Phone ready - Daniel Cohen"
+   - Type: "Device Ready"
+   - Due Date: Today
+   - **✅ Check "📱 Send WhatsApp Message"**
+4. **Save**
+
+**What happens automatically:**
+- AutoMessager finds the task
+- Looks up the message template for "Device Ready"
+- Sends WhatsApp: *"שלום דניאל! המכשיר S24 מוכן לאיסוף"*
+- Updates the task: "✅ Completed - Message sent successfully"
+
+#### **Example 2: Payment Reminder**
+
+**What you do:**
+1. **Create Task** on customer's contact
+2. **Subject**: "Payment reminder - Sarah Miller"
+3. **Type**: "Payment Reminder"
+4. **✅ Check "📱 Send WhatsApp Message"**
+5. **Save**
+
+**What happens automatically:**
+- Sends WhatsApp: *"שלום שרה, יש לך חוב של 250 שקל. תאריך תשלום: 15/01/2025"*
+- Includes payment link from your Excel template
+- Marks task as completed
+
+#### **Example 3: Training Materials**
+
+**What you do:**
+1. **Create Task** on customer's contact
+2. **Subject**: "Send training link - Mike Johnson"
+3. **Type**: "Training"
+4. **✅ Check "📱 Send WhatsApp Message"**
+5. **Save**
+
+**What happens automatically:**
+- Sends WhatsApp with training link
+- Uses customer's name and device model from Salesforce
+- Creates audit trail in both Task and Contact records
+
+### **📋 Daily Operations Workflow**
+
+#### **Morning Routine (5 minutes):**
+1. **Check Salesforce** for tasks marked "📱 Send WhatsApp Message"
+2. **Review** customer details and phone numbers
+3. **Verify** AutoMessager is running (or run it manually)
+4. **Check** delivery status in completed tasks
+
+#### **Throughout the Day:**
+1. **Create new tasks** as customers need messages
+2. **Check the automation box** ✅
+3. **Save** - messages send automatically!
+
+#### **End of Day:**
+1. **Review failed tasks** (if any)
+2. **Handle manual follow-ups** for failed messages
+3. **Check delivery reports** in Salesforce
+
+### **💡 Best Practices**
+
+#### **✅ Do's:**
+- **Always verify** customer phone numbers before checking the box
+- **Use clear, descriptive** task subjects (e.g., "Welcome message - John Smith")
+- **Check the box only** when ready to send immediately
+- **Review failed tasks** daily and fix issues
+- **Use consistent task types** for better template matching
+
+#### **❌ Don'ts:**
+- **Don't check the box** for test messages or internal tasks
+- **Don't create duplicate tasks** for the same customer
+- **Don't leave tasks checked** for days without processing
+- **Don't use the automation** for sensitive or urgent messages without verification
+
+### **🔍 Understanding Task Statuses**
+
+After AutoMessager processes your tasks, you'll see these statuses:
+
+#### **✅ Completed Tasks:**
+- **Status**: "Completed"
+- **Delivery Status**: "SENT"
+- **Glassix Link**: Click to view the WhatsApp conversation
+- **Audit Trail**: Full history of what happened
+
+#### **❌ Failed Tasks:**
+- **Status**: "Waiting on External"
+- **Failure Reason**: Clear explanation (e.g., "Invalid phone number")
+- **Ready for Automation**: Still checked (for retry)
+
+#### **⏳ Pending Tasks:**
+- **Status**: "Not Started"
+- **Ready for Automation**: ✅ Checked
+- **Next**: Will be processed in next AutoMessager run
+
+### **🚨 Troubleshooting Common Issues**
+
+#### **"Message not sent" - What to check:**
+1. **Phone Number**: Is it in correct format (+972501234567)?
+2. **Customer Name**: Does the contact have a valid name?
+3. **Template Match**: Does your Excel file have a template for this task type?
+4. **Template Approval**: Is the Glassix template approved?
+
+#### **"Task still pending" - What to check:**
+1. **AutoMessager Running**: Is the system running automatically or manually?
+2. **Task Type**: Does the task type match your Excel template names?
+3. **Hold Queue**: Check if template needs approval (rare)
+
+#### **"Wrong message sent" - What to check:**
+1. **Task Type**: Verify the task type matches your intended template
+2. **Excel Template**: Check your Excel file has the right message
+3. **Template Matching**: System auto-matches - verify it chose correctly
+
+### **📞 Getting Help**
+
+#### **If Something Goes Wrong:**
+1. **Check the task** - look at "Failure Reason" field
+2. **Review logs** - contact your technical support
+3. **Manual override** - uncheck the box and send manually through Glassix
+4. **Contact support** - provide task ID and error details
+
+#### **Common Support Questions:**
+- **"How do I know if the message was sent?"** → Check task status and Glassix link
+- **"Can I send messages manually too?"** → Yes! Uncheck the box and use Glassix directly
+- **"What if I check the wrong box?"** → Uncheck it before the system runs
+- **"How do I add new message templates?"** → Update your Excel file
+
+### **🎯 Quick Reference Card**
+
+**For Daily Use:**
+1. **Create Task** on customer contact
+2. **Fill Subject**: "Message type - Customer Name"
+3. **Check Box**: "📱 Send WhatsApp Message" ✅
+4. **Save** - Done!
+
+**Task Types That Work:**
+- Device Ready
+- Payment Reminder
+- Training Link
+- Welcome Message
+- Appointment Confirmation
+- Service Follow-up
+
+**What Happens Automatically:**
+- ✅ Finds customer phone and name
+- ✅ Matches message template
+- ✅ Sends WhatsApp message
+- ✅ Updates task with results
+- ✅ Creates audit trail
+
+---
+
+**Remember: It's as simple as creating a task and checking one box! The system handles everything else automatically.** 🚀
+
 ### What It Does NOT Do
 
 ❌ **Does not send spam** - Only processes tasks you mark as "Ready for Automation"  

@@ -14,9 +14,18 @@ build/
 logs/
 *.log
 
-# Documentation exports
+# Documentation exports and temporary files
 docs/project_export.txt
 project_export.txt
+*_EXPORT*.txt
+*_SUMMARY*.md
+*_COMPLETE*.md
+*_FINAL*.md
+*_FIXES*.md
+*_IMPROVEMENTS*.md
+*_CONSOLIDATED*.md
+*_STRUCTURE*.md
+*_PUSH*.md
 
 # OS files
 .DS_Store
