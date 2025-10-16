@@ -13,6 +13,11 @@ import { getLogger, withRid } from './logger.js';
 import * as sf from './sf.js';
 import { sendWhatsApp } from './glassix.js';
 import { loadTemplateMap, pickTemplate, renderMessage } from './templates.js';
+import { findBestTemplateMatch } from './template-matcher.js';
+import { classifyError } from './error-taxonomy.js';
+import { TemplateStatusMonitor } from './template-monitor.js';
+import { TemplateHoldQueue } from './template-hold-queue.js';
+import { TemplateComplianceValidator } from './template-compliance.js';
 import { todayIso, todayHe } from './utils/date.js';
 import { mask } from './phone.js';
 import type { NormalizedMapping } from './types.js';
@@ -134,6 +139,40 @@ export async function runOnce(): Promise<RunStats> {
     // Step 2: Load template map
     const templateMap = await loadTemplateMap();
     log.info({ templateCount: templateMap.size }, 'Templates loaded');
+
+    // Step 2b: Initialize template monitoring and compliance systems
+    const templateMonitor = new TemplateStatusMonitor();
+    const holdQueue = new TemplateHoldQueue();
+    const complianceValidator = new TemplateComplianceValidator();
+    
+    // Make holdQueue and complianceValidator available for processTask function
+    (global as any).holdQueue = holdQueue;
+    (global as any).complianceValidator = complianceValidator;
+    
+    // Check template statuses and process hold queue
+    const monitoringResults = await templateMonitor.monitorTemplateStatuses();
+    const holdQueueResults = await holdQueue.processHoldQueue();
+    
+    if (holdQueueResults.retried.length > 0) {
+      log.info(
+        { retriedCount: holdQueueResults.retried.length },
+        'Tasks retried from hold queue after template approval'
+      );
+    }
+    
+    if (holdQueueResults.escalated.length > 0) {
+      log.warn(
+        { escalatedCount: holdQueueResults.escalated.length },
+        'Tasks escalated due to template approval delays'
+      );
+    }
+    
+    if (monitoringResults.rejections.length > 0) {
+      log.warn(
+        { rejectionCount: monitoringResults.rejections.length },
+        'Template rejections detected - check audit log'
+      );
+    }
 
     // Step 3: Connect to Salesforce
     conn = await sf.login();
@@ -365,15 +404,149 @@ async function processTask(
     defaultLang: config.DEFAULT_LANG,
   });
 
-  // Step g) Send message
+  // Step f.2) Smart template matching if no Glassix template configured
+  let finalTemplateId = viaGlassixTemplate;
+  
+  if (!viaGlassixTemplate) {
+    try {
+      const match = await findBestTemplateMatch(text, taskKey);
+      
+      if (match) {
+        finalTemplateId = match.template.name; // Use template NAME as ID
+        
+        // Check template approval status before processing
+        const templateStatus = match.template.status;
+        if (templateStatus !== 'APPROVED') {
+          logger.warn(
+            {
+              taskId: task.Id,
+              taskKey,
+              matchedTemplate: match.template.name,
+              templateStatus,
+              customerPhone: mask(target.phoneE164)
+            },
+            'Template not approved - adding to hold queue'
+          );
+          
+          // Add to hold queue instead of failing
+          await (global as any).holdQueue.addToHoldQueue(
+            task.Id,
+            taskKey,
+            match.template.name,
+            templateStatus as any,
+            target.phoneE164,
+            target.firstName || 'Unknown',
+            ctx,
+            'NORMAL',
+            `Template status: ${templateStatus}`
+          );
+          
+          stats.skipped++;
+          recordTaskResult('skipped');
+          stats.errors.push({ 
+            taskId: task.Id, 
+            reason: `TEMPLATE_NOT_APPROVED: ${templateStatus}` 
+          });
+          
+          await updater.markFailed(
+            task.Id,
+            `TEMPLATE_NOT_APPROVED: Template ${match.template.name} status is ${templateStatus}`
+          );
+          return;
+        }
+        
+        // Validate template parameters before sending (fail fast)
+        const { validateTemplateParameters } = await import('./template-validator.js');
+        const validation = validateTemplateParameters(match.template, ctx);
+        
+        if (!validation.valid) {
+          logger.warn(
+            {
+              taskId: task.Id,
+              taskKey,
+              matchedTemplate: match.template.name,
+              validationErrors: validation.errors,
+              parameterCount: validation.parameterCount,
+              expectedCount: validation.expectedCount
+            },
+            'Template parameter validation failed - skipping task'
+          );
+          stats.skipped++;
+          
+          await updater.markFailed(
+            task.Id,
+            `TEMPLATE_VALIDATION_FAILED: ${validation.errors.join(', ')}`
+          );
+          return;
+        }
+        
+        if (validation.warnings.length > 0) {
+          logger.warn(
+            {
+              taskId: task.Id,
+              taskKey,
+              matchedTemplate: match.template.name,
+              validationWarnings: validation.warnings
+            },
+            'Template parameter validation warnings'
+          );
+        }
+        
+        logger.info(
+          {
+            taskId: task.Id,
+            taskKey,
+            matchedTemplate: match.template.name,
+            confidence: match.confidence,
+            score: match.score.toFixed(2),
+            reason: match.reason,
+            parameterCount: validation.parameterCount
+          },
+          'Auto-matched Glassix template with validated parameters'
+        );
+      } else {
+        // NO MATCH FOUND - Skip this task (WhatsApp compliance)
+        logger.warn(
+          {
+            taskId: task.Id,
+            taskKey,
+            messagePreview: text.substring(0, 100)
+          },
+          'No Glassix template match - skipping task to ensure WhatsApp compliance'
+        );
+        stats.skipped++;
+        
+        // Mark task with special status for manual review
+        await updater.markFailed(
+          task.Id,
+          'NO_TEMPLATE_MATCH: No approved Glassix template found for this message. Manual intervention required.'
+        );
+        return;
+      }
+    } catch (error) {
+      logger.error(
+        {
+          taskId: task.Id,
+          taskKey,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        'Template matching failed - skipping task'
+      );
+      stats.skipped++;
+      await updater.markFailed(task.Id, `Template matching error: ${error}`);
+      return;
+    }
+  }
+
+  // Step g) Send message using matched template
   if (isDryRun) {
-    // DRY_RUN: just log intent
     logger.info(
       {
         taskId: task.Id,
         taskKey,
         to: mask(target.phoneE164),
-        templated: !!viaGlassixTemplate,
+        templateId: finalTemplateId,
+        templated: !!finalTemplateId,
         previewLen: text.length,
       },
       'DRY_RUN send'
@@ -383,12 +556,66 @@ async function processTask(
   }
 
   try {
+    // Resolve language for template sending
+    const language = 
+      mapping.language ||
+      (finalTemplateId ? 'he' : undefined) || // Default to Hebrew for templates
+      config.DEFAULT_LANG || 'he';
+
+    // Build customer name and subject using Hebrew policy (manual workflow requirement)
+    const { generateCustomerName, generateHebrewSubject } = await import('./hebrew-subjects.js');
+    
+    const customerName = generateCustomerName(
+      target.firstName,
+      undefined, // lastName not available in TargetResolution
+      target.accountName
+    );
+
+    const subject = generateHebrewSubject(taskKey, {
+      accountName: target.accountName,
+      date: ctx.date_he,
+      firstName: target.firstName,
+    });
+
+    // Check daily deduplication (prevent sending identical templates within 24h)
+    const { shouldSkipDueToDailyDedupe } = await import('./daily-dedupe.js');
+    const dedupeCheck = await shouldSkipDueToDailyDedupe(
+      _conn,
+      task.Id,
+      target.phoneE164,
+      finalTemplateId || 'unknown',
+      24 // 24 hours threshold
+    );
+    
+    if (dedupeCheck.shouldSkip) {
+      stats.skipped++;
+      recordTaskResult('skipped');
+      stats.errors.push({ taskId: task.Id, reason: dedupeCheck.reason || 'Daily deduplication' });
+      
+      await updater.markFailed(
+        task.Id,
+        `DAILY_DEDUPLICATION: ${dedupeCheck.reason}`
+      );
+      return;
+    }
+
+    // Generate deterministic idempotency key (prevents accidental duplicates)
+    const { generateDeterministicId } = await import('./template-validator.js');
+    const deterministicIdemKey = generateDeterministicId(
+      task.Id,
+      finalTemplateId || 'unknown',
+      ctx
+    );
+
     const sendResult = await sendWhatsApp({
       toE164: target.phoneE164,
       text,
-      idemKey: task.Id,
-      templateId: viaGlassixTemplate,
-      variables: ctx, // harmless; Glassix ignores extras if not templated
+      idemKey: deterministicIdemKey, // Use deterministic key instead of just task.Id
+      templateId: finalTemplateId, // Always includes template ID now
+      variables: ctx,
+      language,
+      customerName,
+      subject,
     });
 
     // Step h) Success path
@@ -403,19 +630,46 @@ async function processTask(
       'Message sent'
     );
 
-    await updater.markCompleted(task.Id, { phoneE164: target.phoneE164, sendResult });
+    // Extract WhoId for audit trail writeback
+    const whoId = (task.Who as any)?.Id;
+
+    await updater.markCompleted(task.Id, { 
+      phoneE164: target.phoneE164, 
+      sendResult,
+      taskKey,
+      templateName: finalTemplateId || 'unknown',
+      whoId,
+    });
   } catch (error: unknown) {
-    // Step i) Failure path
+    // Step i) Failure path with error taxonomy
     const errorReason = error instanceof Error ? error.message : String(error);
+    const errorClassification = classifyError(errorReason);
+    
     stats.failed++;
     recordTaskResult('failed');
-    stats.errors.push({ taskId: task.Id, reason: errorReason });
+    stats.errors.push({ 
+      taskId: task.Id, 
+      reason: `${errorClassification.code}: ${errorReason}`,
+      category: errorClassification.category,
+      severity: errorClassification.severity,
+      code: errorClassification.code
+    } as any);
+    
     logger.error(
-      { taskId: task.Id, to: mask(target.phoneE164), error: errorReason },
+      { 
+        taskId: task.Id, 
+        to: mask(target.phoneE164), 
+        error: errorReason,
+        errorCategory: errorClassification.category,
+        errorSeverity: errorClassification.severity,
+        errorCode: errorClassification.code,
+        actionable: errorClassification.actionable,
+        retryable: errorClassification.retryable
+      },
       'Send failed'
     );
 
-    await updater.markFailed(task.Id, errorReason);
+    await updater.markFailed(task.Id, `${errorClassification.code}: ${errorReason}`);
   }
 }
 

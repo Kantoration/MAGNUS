@@ -665,6 +665,8 @@ export function renderMessage(
   }
 
   // Return result
+  // NOTE: If glassixTemplateId is manually configured in Excel, it takes precedence
+  // Otherwise, template-matcher.ts will auto-match at runtime
   if (mapping.glassixTemplateId) {
     return {
       text,

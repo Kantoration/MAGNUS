@@ -39,14 +39,34 @@ const logger = getLogger();
  */
 export type SendParams = {
   toE164: string; // E.164 phone number (e.g., +972521234567)
-  text: string; // Message text
+  text?: string; // Message text (used only if templateId absent)
   idemKey: string; // Idempotency key (typically Task.Id)
   templateId?: string; // If provided, uses template mode
   variables?: Record<string, string | number | boolean | null>; // Template variables
+  language?: string; // Optional language override
+  customerName?: string; // Customer name for conversation tracking (manual workflow requirement)
+  subject?: string; // Conversation subject (נושא) - manual workflow requirement
 };
 
 // Re-export SendResult type for backward compatibility
 export type { SendResult };
+
+/**
+ * Glassix template structure
+ */
+export interface GlassixTemplate {
+  id: string;
+  name: string;
+  content: string;
+  language: string;
+  status: 'APPROVED' | 'PENDING' | 'REJECTED';
+  category?: string;
+  components?: Array<{
+    type: string;
+    text?: string;
+    parameters?: string[];
+  }>;
+}
 
 /**
  * Access token cache (module-level)
@@ -194,6 +214,31 @@ async function authHeader(): Promise<{ Authorization: string }> {
 }
 
 /**
+ * Convert variables object to WhatsApp component parameters
+ * Creates ordered parameters for template body components
+ */
+async function buildTemplateComponents(vars?: Record<string, any>, templateName?: string) {
+  if (!vars) return [];
+
+  // Import template parameter ordering
+  const { getTemplateParamOrder } = await import('./template-param-map.js');
+  
+  // Get ordered keys for this template (or heuristic fallback)
+  const availableVars = Object.keys(vars);
+  const orderedKeys = templateName 
+    ? getTemplateParamOrder(templateName, availableVars)
+    : availableVars.sort(); // Fallback to alphabetical
+
+  const parameters = orderedKeys
+    .map(k => (vars[k] == null ? '' : String(vars[k])))
+    .map(value => ({ type: 'text', text: value }));
+
+  return parameters.length
+    ? [{ type: 'body', parameters }]
+    : [];
+}
+
+/**
  * Send WhatsApp message (single attempt, no retry)
  */
 async function sendOnce(params: SendParams): Promise<SendResult> {
@@ -201,32 +246,44 @@ async function sendOnce(params: SendParams): Promise<SendResult> {
   const base = config.GLASSIX_BASE_URL.replace(/\/+$/, '');
   const mode = config.GLASSIX_API_MODE;
 
+  // Choose language (fallback to config, then 'he')
+  const lang = (params.language || config.DEFAULT_LANG || 'he').toLowerCase();
+
   // Build URL and body based on API mode
   let url: string;
   let body: Record<string, unknown>;
 
   if (mode === 'messages') {
+    // Always use /api/messages/send endpoint
+    url = `${base}/api/messages/send`;
+    
+    // Build payload
+    body = {
+      to: params.toE164,
+      channel: 'whatsapp',
+    };
+
+    // Add conversation metadata (manual workflow requirement)
+    if (params.customerName) {
+      body.customerName = params.customerName;
+    }
+    if (params.subject) {
+      body.subject = params.subject;
+    }
+
     if (params.templateId) {
-      // Template mode
-      url = `${base}/api/messages/template`;
-      body = {
-        channel: 'whatsapp',
-        to: params.toE164,
-        templateId: params.templateId,
-        variables: params.variables ?? {},
+      // Build WhatsApp template payload
+      body.template = {
+        name: params.templateId,        // template name
+        language: { code: lang },       // WhatsApp expects BCP-47-ish
+        components: await buildTemplateComponents(params.variables, params.templateId),
       };
     } else {
-      // Free text mode
-      url = `${base}/api/messages`;
-      body = {
-        channel: 'whatsapp',
-        to: params.toE164,
-        type: 'text',
-        text: params.text,
-      };
+      // Free text (only allowed for non-first contacts or ongoing sessions)
+      body.text = params.text || '';
     }
   } else {
-    // protocols mode
+    // protocols mode - keep existing structure
     url = `${base}/v1/protocols/send`;
     body = {
       protocol: 'whatsapp',
@@ -362,6 +419,53 @@ export async function sendWhatsApp(params: SendParams): Promise<SendResult> {
   // Should never reach here
   recordSendResult('fail');
   throw new Error('Send failed after retries');
+}
+
+/**
+ * Retrieve approved WhatsApp templates from Glassix
+ * Uses canned replies endpoint (templates are stored as canned replies)
+ */
+export async function getApprovedTemplates(): Promise<GlassixTemplate[]> {
+  const config = getConfig();
+  const base = config.GLASSIX_BASE_URL.replace(/\/+$/, '');
+  
+  const headers = {
+    ...(await authHeader()),
+    'Content-Type': 'application/json',
+  };
+
+  try {
+    // Glassix stores WhatsApp templates as "canned replies"
+    const response = await axios.get(`${base}/api/canned-replies`, {
+      headers,
+      timeout: config.GLASSIX_TIMEOUT_MS,
+      params: {
+        channel: 'whatsapp',
+        status: 'APPROVED'
+      }
+    });
+
+    // Fall back to different response structures
+    const raw = response.data?.replies ?? response.data?.items ?? response.data ?? [];
+    const templates: GlassixTemplate[] = raw
+      .filter((t: any) => (t.status ?? t.state) === 'APPROVED')
+      .map((t: any) => ({
+        id: t.id || t._id,
+        name: t.name || t.title,
+        content: t.content || t.text || t.body || '',
+        language: (t.language || 'he').toLowerCase().slice(0, 2), // Normalize to two-letter
+        status: 'APPROVED',
+        category: t.category,
+        components: t.components
+      }));
+
+    logger.info({ count: templates.length }, 'Retrieved Glassix approved templates');
+    return templates;
+  } catch (error) {
+    const msg = buildSafeAxiosError(error);
+    logger.warn({ error: msg }, 'Failed to fetch Glassix templates - will proceed without template matching');
+    return []; // Return empty array instead of throwing - allows system to continue
+  }
 }
 
 /**

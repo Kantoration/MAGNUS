@@ -197,6 +197,16 @@ async function verifyMappingCommand() {
   }
 }
 
+async function discoverTemplatesCommand() {
+  try {
+    const { discoverTemplates } = await import('../src/cli/template-discovery.js');
+    await discoverTemplates();
+  } catch (error) {
+    console.error('Error:', error);
+    process.exit(1);
+  }
+}
+
 /**
  * Doctor command - deep diagnostics
  */
@@ -387,6 +397,136 @@ async function main() {
     .command('verify:mapping')
     .description('Strict Excel mapping validation only')
     .action(verifyMappingCommand);
+
+  program
+    .command('discover-templates')
+    .description('Discover Glassix approved templates and test matching with Excel messages')
+    .option('--why', 'Show why templates don\'t match (top 3 candidates for each unmatched task)')
+    .action(discoverTemplatesCommand);
+
+  // Template monitoring commands
+  const templateMonitoring = new Command('template-monitoring')
+    .description('Monitor and manage template approval status and compliance');
+
+  templateMonitoring
+    .command('status')
+    .description('Check template approval statuses')
+    .option('--verbose', 'Show detailed status information')
+    .action(async (options) => {
+      try {
+        const { TemplateStatusMonitor } = await import('../src/template-monitor.js');
+        const monitor = new TemplateStatusMonitor();
+        const results = await monitor.monitorTemplateStatuses();
+
+        console.log('\n📊 Template Status Summary:');
+        console.log('=' .repeat(50));
+        
+        if (options.verbose) {
+          console.log(`\n✅ Approved Templates: ${results.approvals.length}`);
+          results.approvals.forEach(template => {
+            console.log(`   • ${template.name} (${template.templateId})`);
+          });
+
+          console.log(`\n❌ Rejected Templates: ${results.rejections.length}`);
+          results.rejections.forEach(rejection => {
+            console.log(`   • ${rejection.name} (${rejection.category})`);
+            console.log(`     Reason: ${rejection.reason}`);
+            console.log(`     Auto-fixable: ${rejection.autoFixable ? 'Yes' : 'No'}`);
+            if (rejection.suggestions.length > 0) {
+              console.log(`     Suggestions: ${rejection.suggestions.join(', ')}`);
+            }
+          });
+        } else {
+          console.log(`✅ Approved: ${results.approvals.length}`);
+          console.log(`❌ Rejected: ${results.rejections.length}`);
+          console.log(`🔄 Changed: ${results.statusChanges.length}`);
+        }
+      } catch (error) {
+        console.error('Error:', error);
+        process.exit(1);
+      }
+    });
+
+  templateMonitoring
+    .command('hold-queue')
+    .description('Manage template hold queue')
+    .option('--stats', 'Show hold queue statistics')
+    .option('--list', 'List all tasks in hold queue')
+    .option('--process', 'Process hold queue (check for retries)')
+    .action(async (options) => {
+      try {
+        const { TemplateHoldQueue } = await import('../src/template-hold-queue.js');
+        const holdQueue = new TemplateHoldQueue();
+
+        if (options.stats) {
+          const stats = holdQueue.getHoldQueueStats();
+          console.log('\n📋 Hold Queue Statistics:');
+          console.log(`Total Queued: ${stats.totalQueued}`);
+          console.log(`Retryable: ${stats.retryableCount}`);
+          console.log(`Escalated: ${stats.escalatedCount}`);
+        }
+
+        if (options.list) {
+          const entries = holdQueue.getHoldQueueEntries();
+          console.log(`\n📋 Hold Queue Entries (${entries.length}):`);
+          entries.forEach(entry => {
+            const age = Math.round((Date.now() - new Date(entry.queuedAt).getTime()) / (1000 * 60 * 60));
+            console.log(`Task: ${entry.taskId} - ${entry.templateName} (${entry.templateStatus}) - ${age}h old`);
+          });
+        }
+
+        if (options.process) {
+          const results = await holdQueue.processHoldQueue();
+          console.log(`✅ Retried: ${results.retried.length}`);
+          console.log(`⚠️  Escalated: ${results.escalated.length}`);
+          console.log(`⏳ Still Waiting: ${results.stillWaiting.length}`);
+        }
+      } catch (error) {
+        console.error('Error:', error);
+        process.exit(1);
+      }
+    });
+
+  templateMonitoring
+    .command('compliance')
+    .description('Validate template compliance')
+    .argument('<template-name>', 'Template name to validate')
+    .argument('<content>', 'Template content')
+    .option('--auto-fix', 'Attempt to auto-fix compliance issues')
+    .action(async (templateName, content, options) => {
+      try {
+        const { TemplateComplianceValidator } = await import('../src/template-compliance.js');
+        const validator = new TemplateComplianceValidator();
+        
+        const variableMatches = content.match(/\{\{([^}]+)\}\}/g);
+        const variables = variableMatches ? variableMatches.map((m: string) => m.slice(2, -2)) : [];
+
+        const report = options.autoFix 
+          ? validator.autoFixTemplate(templateName, content, variables)
+          : validator.validateTemplate(templateName, content, variables);
+
+        console.log(`\n📊 Compliance Report for ${templateName}:`);
+        console.log(`Score: ${report.score}/100`);
+        console.log(`Status: ${report.status}`);
+        console.log(`Issues: ${report.issues.length}`);
+
+        if (report.issues.length > 0) {
+          report.issues.forEach(issue => {
+            console.log(`   ${issue.severity}: ${issue.message}`);
+          });
+        }
+
+        if (report.autoFixed) {
+          console.log('\n🔧 Auto-Fix Applied:');
+          console.log(`Fixed: ${report.autoFixed.fixedContent}`);
+        }
+      } catch (error) {
+        console.error('Error:', error);
+        process.exit(1);
+      }
+    });
+
+  program.addCommand(templateMonitoring);
 
   program
     .command('doctor')

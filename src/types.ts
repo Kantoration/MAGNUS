@@ -67,6 +67,7 @@ export type NormalizedMapping = {
   messageBody?: string; // from מלל הודעה
   link?: string; // from Link
   glassixTemplateId?: string; // from שם הודעה מובנית בגלאסיקס
+  language?: string; // optional language override
 };
 
 export type RenderContext = {

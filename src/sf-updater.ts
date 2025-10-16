@@ -56,6 +56,9 @@ export interface TaskFieldMap {
 export interface CompletionDetails {
   phoneE164: string;
   sendResult: SendResult;
+  taskKey: string;
+  templateName: string;
+  whoId?: string; // Contact or Lead ID for audit trail writeback
 }
 
 /**
@@ -251,6 +254,12 @@ export class SalesforceTaskUpdater {
             { taskId, maskedPhone, providerId, attempt, auditField: targetField },
             'Task marked completed'
           );
+
+          // Write back to Contact/Lead record for audit trail (manual workflow requirement)
+          if (details.whoId) {
+            await this.createAuditTask(details.whoId, details.taskKey, details.templateName, details.sendResult.providerId);
+          }
+
           return; // Success
         } catch (updateError: unknown) {
           lastError = updateError instanceof Error ? updateError : new Error(String(updateError));
@@ -354,6 +363,52 @@ export class SalesforceTaskUpdater {
         logger.warn({ taskId, error: errorMsg }, 'Failed to update task to Waiting (non-fatal)');
       }
       // Don't throw - continue processing other tasks
+    }
+  }
+
+  /**
+   * Create audit task on Contact/Lead record (manual workflow requirement)
+   * This replicates what a human rep would do: log activity back to the contact record
+   */
+  private async createAuditTask(
+    whoId: string,
+    taskKey: string,
+    templateName: string,
+    providerId?: string
+  ): Promise<void> {
+    try {
+      const auditSubject = `Glassix: ${templateName} (auto)`;
+      const auditDescription = [
+        `Automated message sent via Glassix template: ${templateName}`,
+        `Task Type: ${taskKey}`,
+        providerId ? `Glassix Message ID: ${providerId}` : '',
+        `Sent: ${new Date().toISOString()}`
+      ].filter(Boolean).join('\n');
+
+      const auditTask = {
+        WhoId: whoId,
+        Subject: auditSubject,
+        Status: 'Completed',
+        Description: auditDescription,
+        ActivityDate: new Date().toISOString().split('T')[0],
+        Priority: 'Normal',
+        Type: 'Glassix Message',
+        // Mark as automation-generated for tracking
+        Created_by_Automation__c: true,
+      };
+
+      await this.conn.sobject('Task').create(auditTask);
+
+      logger.debug(
+        { whoId, taskKey, templateName, providerId },
+        'Created audit task on Contact/Lead record'
+      );
+    } catch (error) {
+      // Non-fatal: audit trail creation failure shouldn't block main flow
+      logger.warn(
+        { whoId, taskKey, templateName, error: error instanceof Error ? error.message : String(error) },
+        'Failed to create audit task on Contact/Lead record (non-fatal)'
+      );
     }
   }
 }

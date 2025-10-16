@@ -1,0 +1,59 @@
+﻿An image of blue sticky notes on a wall with a yellow one standing out 
+
+Daily Messaging brief
+
+
+
+
+
+
+Document Purpose:
+
+
+This specification outlines the end-to-end process and technical interface required for the automated daily messaging task within the Magnus platforms.
+
+
+
+
+Scope
+The document details the flow of data, system interactions, and required logic between all involved platforms (e.g., Magnus core, CRM/Database, Messaging Service Provider, etc.) from the initiation of the task to the successful delivery of the daily messages.
+
+
+
+
+Flow explanation
+Platforms
+This automation solution integrates two primary platforms:
+
+
+Platform
+	Role in DMA
+	Key Data Entities
+	Salesforce (SFDC)
+	Source of Truth (SoT) for recipient lists and required personalization data.
+	Custom Reports (Recipient Data), Contact/Lead Records.
+	Glassix
+	Messaging Service Provider (MSP) for template-based, multi-channel message delivery (primarily WhatsApp).
+	Pre-Approved Message Templates
+	The daily messaging tasks are mandated to execute a set of 9 distinct daily messaging tasks. Each task is defined by:
+1. A specific SFDC Report (the recipient list and required data set).
+2. A corresponding, pre-approved Glassix Message Template (the content).
+  
+
+Workflow 
+3.1 Data Acquisition (SFDC)
+1. Report Access: The Representative navigates to the specific Salesforce Report corresponding to the daily task.
+2. Key Data Extraction: For each contact in the report, the Representative manually extracts the following mandatory data points required for the messaging service:
+   * Contact Phone Number (Primary addressing field).
+   * Personalization Fields (e.g., Full Name, Email, or other specific data points referenced in the message template).
+3.2 Message Delivery (Glassix)
+The Representative iterates through the list of recipients obtained in Step 3.1:
+1. Conversation Initiation: The Representative navigates to the Glassix UI and initiates a new conversation.
+2. Mandatory Metadata Entry (The Manual Input): The Representative must manually input or copy the following details into the designated Glassix conversation fields, using the data extracted from the SFDC Report:
+   * Recipient Phone Number (Primary addressing field).
+   * Customer Name (For conversation tracking in Glassix).
+   * Conversation Subject (נושא).
+3. Template Selection & Content Population: After creating the conversation shell, the Representative manually selects the pre-defined Glassix Message Template that is uniquely associated with the current daily task (e.g., satellite_connection_finish). The template then automatically populates with any embedded personalization fields (variables) based on the recipient's details already entered or maintained by Glassix.
+4. Message Send: The Representative manually confirms and sends the final message.
+3.3 Status Logging (Manual Traceability)
+After successful delivery, the Representative is required to manually log the messaging activity back into the corresponding SFDC contact record for audit and traceability.

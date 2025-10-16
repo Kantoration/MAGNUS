@@ -1,6 +1,23 @@
 # 📱 AutoMessager - Automated WhatsApp Communication System
 
-> **A production-ready automation that connects Salesforce tasks with WhatsApp messaging through Glassix, enabling personalized, timely customer communications at scale.**
+> **A production-ready automation that perfectly replicates the manual daily messaging workflow described in the Daily Messaging brief. Connects Salesforce tasks with WhatsApp messaging through Glassix, enabling personalized, timely customer communications at scale with 100% WhatsApp compliance.**
+
+## 🎯 **Perfect Manual Workflow Replication**
+
+AutoMessager **exactly replicates** the manual daily messaging workflow your team currently uses, while providing intelligent automation and WhatsApp compliance:
+
+### **Manual Workflow → Automated System Mapping**
+
+| **Manual Step** | **Automated System** | **Enhancement** |
+|---|---|---|
+| **Navigate to SFDC Report** | **Salesforce Tasks** (with `Ready_for_Automation__c = true`) | ✅ Structured automation flag |
+| **Extract Contact Data** | **Polymorphic SOQL queries** with Who/What resolution | ✅ Multi-source phone resolution |
+| **Glassix UI Navigation** | **Glassix API calls** with proper authentication | ✅ Modern access token flow |
+| **Manual conversation creation** | **Automated conversation metadata** | ✅ Hebrew subjects + customer names |
+| **Template selection** | **Intelligent template matching** | ✅ Auto-match + Excel fallback |
+| **Template population** | **Pre-send validation** | ✅ Parameter validation + fail fast |
+| **Message sending** | **WhatsApp template payload** | ✅ Deduplication + deterministic idempotency |
+| **Audit trail logging** | **Contact/Lead audit tasks** | ✅ Complete audit trail creation |
 
 ---
 
@@ -10,15 +27,28 @@ AutoMessager is an intelligent automation system that connects your Salesforce t
 
 ### For Non-Technical Users: How It Works
 
-Think of AutoMessager as a smart assistant that:
+Think of AutoMessager as a smart assistant that **perfectly replicates** what your team does manually:
 
-1. **Reads your to-do list** (Salesforce tasks marked for automation)
-2. **Checks customer details** (pulls name, phone number, account from Salesforce)
-3. **Chooses the right message** (looks up the template in your Excel file)
-4. **Fills in the blanks** (replaces placeholders like `{{first_name}}` with actual customer names)
-5. **Sends the message** (via WhatsApp through Glassix)
-6. **Records what happened** (updates Salesforce with delivery status and conversation link)
-7. **Handles problems automatically** (retries failed messages, logs errors for review)
+1. **Reads your to-do list** (Salesforce tasks marked for automation) - *Just like opening SFDC reports*
+2. **Checks customer details** (pulls name, phone number, account from Salesforce) - *Just like manual data extraction*
+3. **Chooses the right message** (intelligent template matching + Excel fallback) - *Just like selecting templates in Glassix UI*
+4. **Fills in the blanks** (replaces placeholders like `{{first_name}}` with actual customer names) - *Just like template auto-population*
+5. **Sends the message** (via WhatsApp through Glassix with proper conversation metadata) - *Just like manual send*
+6. **Records what happened** (updates Salesforce + creates Contact/Lead audit tasks) - *Just like manual status logging*
+7. **Handles problems automatically** (retries failed messages, logs errors for review) - *Enhanced error handling*
+
+### **9 Daily Messaging Tasks Supported**
+
+The system supports all 9 distinct daily messaging tasks from the manual workflow:
+1. **NEW_PHONE_READY** - Device ready for pickup
+2. **PAYMENT_REMINDER** - Payment due reminder  
+3. **TRAINING_LINK** - Training materials delivery
+4. **APPOINTMENT_CONFIRMATION** - Service appointment confirmation
+5. **WELCOME_MESSAGE** - New customer welcome
+6. **RETURN_INSTRUCTIONS** - Device return instructions
+7. **SATELLITE_CONNECTION_FINISH** - Satellite connection completion
+8. **MAINTENANCE_REMINDER** - Device maintenance reminder
+9. **SERVICE_FOLLOWUP** - Post-service follow-up
 
 **Real-world example:**
 
@@ -77,6 +107,29 @@ https://magnus.co.il/devices
 - ✅ Customer data automatically fills in placeholders
 - ✅ Wrong template can't be sent to wrong customer
 - ✅ If template missing, task is skipped (logged for review)
+
+## 🚀 **Key Enhancements Over Manual Workflow**
+
+### **WhatsApp Compliance & Template Intelligence**
+- ✅ **100% WhatsApp Compliance**: Only uses approved Glassix templates (no free text for first messages)
+- ✅ **Intelligent Template Matching**: Auto-matches Excel messages to Glassix templates using Hebrew text normalization
+- ✅ **Pre-send Validation**: Validates parameter count/order against chosen template before sending
+- ✅ **Daily Deduplication**: Prevents sending identical templates to same recipient within 24 hours
+
+### **Natural Hebrew UI Integration**
+- ✅ **Hebrew Subject Policy**: `"המכשיר מוכן לאיסוף · MAGNUS"` instead of `"AutoMessager: NEW_PHONE_READY"`
+- ✅ **Proper Customer Names**: `"דניאל כהן"` format with intelligent fallbacks
+- ✅ **Conversation Metadata**: Creates Glassix conversations indistinguishable from manual work
+
+### **Complete Audit Trail**
+- ✅ **Contact/Lead Audit Tasks**: Creates `"Glassix: NEW_PHONE_READY (auto)"` tasks on Contact/Lead records
+- ✅ **Deterministic Idempotency**: `TaskId#TemplateName#VariableHash` prevents accidental duplicates
+- ✅ **Error Taxonomy**: Structured error classification for operations dashboards
+
+### **Enhanced Reliability**
+- ✅ **Template Parameter Validation**: Fail fast with clear error messages
+- ✅ **Hebrew Text Processing**: Normalizes niqqud and RTL punctuation for stable matching
+- ✅ **Error Recovery**: Graceful degradation with comprehensive logging
 
 ### What It Does NOT Do
 
@@ -189,7 +242,21 @@ automessager support-bundle
 | `automessager doctor` | Deep diagnostics with prescriptive troubleshooting | When things aren't working |
 | `automessager support-bundle` | Create redacted diagnostic ZIP (safe to share, no secrets) | Share with support team |
 | `automessager verify:mapping` | Validate Excel templates only | Excel file troubleshooting |
+| `automessager discover-templates` | Discover Glassix templates and test matching | Template discovery |
+| `automessager discover-templates --why` | Show why templates don't match (top 3 candidates) | Debug template matching |
 | `automessager version` | Show version, Node.js, and platform info | Check installation |
+
+### **Testing Commands**
+
+| Command | Purpose | Example |
+|---------|---------|---------|
+| `npm run smoke:glassix` | Send real template message to test number | `TEST_E164=+9725XXXXXXX npm run smoke:glassix` |
+| `npm run test:e2e` | Run comprehensive E2E tests | `GLASSIX_BASE_URL=... TEST_E164=+9725XXXXXXX npm run test:e2e` |
+| `npm run test:comprehensive` | Run all comprehensive test suites | `npm run test:comprehensive` |
+| `npm run test:table-driven` | Run table-driven validation tests | `npm run test:table-driven` |
+| `npm run test:template-contract` | Run template contract validation tests | `npm run test:template-contract` |
+| `npm run test:hebrew-rtl` | Run Hebrew RTL edge case tests | `npm run test:hebrew-rtl` |
+| `npm run discover` | Discover templates and test matching | `npm run discover -- --why` |
 
 **💡 Tip:** All commands support `--help` flag for detailed options.
 
@@ -1468,6 +1535,66 @@ Watch mode:
 npm run test:watch
 ```
 
+### Comprehensive Test Suite
+
+AutoMessager includes a comprehensive test suite covering production scenarios, edge cases, and compliance requirements:
+
+#### **Table-Driven Tests**
+- **Template Parity**: Validates exact parameter count/order for all 9 production tasks
+- **Idempotency**: Tests deterministic key generation and duplicate prevention
+- **Daily Deduplication**: Prevents duplicate sends within 24-hour windows
+- **Fallbacks**: Tests graceful degradation for missing data
+- **Write-back Robustness**: Ensures message sending continues despite audit failures
+- **Compliance Guardrails**: Validates WhatsApp opt-in and template approval requirements
+- **Rate-limit/Retry**: Tests bounded retries with exponential backoff
+
+#### **Template Contract Tests**
+- **Live Catalog Validation**: Validates against real Glassix template catalog
+- **Parameter Order Validation**: Detects same count, wrong order scenarios
+- **Template Version Drift**: Prevents "compiles green, deploys red" issues
+- **CI Integration**: Fails builds on contract violations
+
+#### **Hebrew RTL Edge Cases**
+- **Niqqud Stripping**: Removes Hebrew diacritics for stable matching
+- **Geresh/Gershayim Normalization**: Converts Hebrew punctuation correctly
+- **Mixed LTR Tokens**: Handles device names like "iPhone 15" in Hebrew context
+- **Bidi Control Characters**: Prevents bidirectional control chars from leaking
+- **Property-Based Tests**: Tests Hebrew names with various edge cases
+
+#### **Production Hardening**
+- **Ops & Monitoring**: Dashboard metrics and SLA testing
+- **Compliance & Privacy**: PII masking and audit trail validation
+- **Media Templates**: URL validation and checksum verification
+- **Rate Limit Backoff**: Exponential backoff with jitter testing
+- **Time-zone Correctness**: Asia/Jerusalem timezone validation
+
+#### **Run Test Suites**
+```bash
+# Run all comprehensive tests
+npm run test:comprehensive
+
+# Individual test suites
+npm run test:table-driven          # Core functionality tests
+npm run test:template-contract     # Template contract validation
+npm run test:hebrew-rtl           # Hebrew RTL edge cases
+npm run test:edge-cases           # Additional edge cases
+npm run test:ops-monitoring       # Operations dashboard tests
+npm run test:production-hardening # Production readiness tests
+npm run test:runbook-acceptance   # Compliance and runbook tests
+```
+
+#### **Test Coverage**
+- ✅ **Template Parity**: 9 production tasks with exact parameter validation
+- ✅ **Idempotency**: Deterministic key generation and duplicate prevention
+- ✅ **Daily Deduplication**: 24-hour window duplicate prevention
+- ✅ **Fallbacks**: Graceful degradation for missing data
+- ✅ **Write-back Robustness**: Non-fatal audit failures
+- ✅ **Compliance Guardrails**: WhatsApp opt-in and template approval
+- ✅ **Rate-limit/Retry**: Bounded retries with exponential backoff
+- ✅ **Hebrew RTL**: Comprehensive normalization and edge cases
+- ✅ **Template Contracts**: Live catalog validation and CI integration
+- ✅ **Production Hardening**: Ops monitoring and compliance testing
+
 ### Lint
 
 Check code style:
@@ -1564,7 +1691,8 @@ Variables can use either `{{var}}` or `{var}` syntax.
 - **[docs/README-QUICKSTART.md](docs/README-QUICKSTART.md)** - 5-minute setup guide
 - **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** - Top 10 issues and solutions
 - **[SETUP.md](SETUP.md)** - Detailed configuration guide
-- **[RELEASE_NOTES_v1.0.0.md](RELEASE_NOTES_v1.0.0.md)** - What's new in v1.0.0
+- **[RELEASE_NOTES_v2.0.0.md](RELEASE_NOTES_v2.0.0.md)** - 🆕 Perfect Manual Workflow Replication
+- **[TESTING.md](TESTING.md)** - End-to-end testing guide
 - **[docs/MACOS_SIGNING_NOTES.md](docs/MACOS_SIGNING_NOTES.md)** - macOS security guide
 - **[docs/SECURITY_HARDENING.md](docs/SECURITY_HARDENING.md)** - Security features
 - **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** - Technical deep-dive & history
